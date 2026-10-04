@@ -290,9 +290,7 @@ fun PlayerScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(24.dp)
-                // Keep the player visually centered in the space above the
-                // floating bottom dock instead of centering it behind the dock.
-                .padding(bottom = 200.dp),
+                .padding(bottom = 16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
         ) {

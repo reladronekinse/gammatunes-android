@@ -2,6 +2,7 @@ package com.gammatunes.app
 
 import android.app.Application
 import com.gammatunes.app.auth.AuthRepository
+import com.gammatunes.app.auth.SoundCloudAuthRepository
 import com.gammatunes.app.backend.LocalBackend
 import com.gammatunes.app.offline.OfflineRepository
 import com.gammatunes.app.ui.i18n.LocaleRepository
@@ -22,16 +23,20 @@ class GammaTunesApplication : Application() {
         super.onCreate()
         LocalBackend.start(this)
         OfflineRepository.init(this)
+        com.gammatunes.app.search.SearchHistoryRepository.init(this)
+        com.gammatunes.app.network.NetworkMonitor.init(this)
         PlayHistoryRepository.init(this)
         PlayStatsRepository.init(this)
         LocaleRepository.init(this)
         UiSettingsRepository.init(this)
         PlaybackSettingsRepository.init(this)
         AuthRepository.init(this)
+        SoundCloudAuthRepository.init(this)
 
         appScope.launch {
             if (LocalBackend.awaitReady(timeoutMs = 45_000)) {
                 AuthRepository.restoreSessionIfNeeded()
+                SoundCloudAuthRepository.restoreSessionIfNeeded()
             }
         }
 

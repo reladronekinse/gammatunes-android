@@ -5,7 +5,9 @@ import android.content.Context
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -16,11 +18,13 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.gammatunes.app.model.Track
 import com.gammatunes.app.network.ApiClient
+import com.gammatunes.app.network.backendMessage
 import com.gammatunes.app.offline.OfflineRepository
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
@@ -31,6 +35,12 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
 enum class RepeatMode { OFF, ALL, ONE }
+
+/** A queue slot. [uid] is unique per slot so the same track can appear twice and rows keep identity while reordering. */
+data class QueueEntry(val uid: Long, val track: Track)
+
+/** Lets any track row reach the player (queue actions) without threading it through every screen. */
+val LocalPlayerState = staticCompositionLocalOf<PlayerState?> { null }
 
 @UnstableApi
 class PlayerState(private val context: Context, private val scope: CoroutineScope) {
@@ -59,13 +69,82 @@ class PlayerState(private val context: Context, private val scope: CoroutineScop
         }
     }
 
-    private var queue: List<Track> = emptyList()
-    private var queueIndex: Int = -1
+    private var nextQueueUid = 0L
+
+    /** The full queue (played, current and upcoming tracks), observable from Compose. */
+    var queueEntries by mutableStateOf<List<QueueEntry>>(emptyList())
+        private set
+    var queueIndex by mutableIntStateOf(-1)
+        private set
+
+    private val queue: List<Track> get() = queueEntries.map { it.track }
+
+    /** "Play next": insert right after the current track (moves it if it is already queued). */
+    fun enqueueNext(track: Track) {
+        val idx = queueIndex
+        if (currentTrack == null || idx !in queueEntries.indices) {
+            play(track)
+            return
+        }
+        val list = queueEntries.toMutableList()
+        var current = idx
+        val existing = list.indexOfFirst { it.track.videoId == track.videoId }
+        if (existing >= 0 && existing != current) {
+            list.removeAt(existing)
+            if (existing < current) current--
+        }
+        list.add(current + 1, QueueEntry(nextQueueUid++, track))
+        queueEntries = list
+        queueIndex = current
+    }
+
+    fun moveQueueItem(from: Int, to: Int) {
+        val list = queueEntries.toMutableList()
+        if (from !in list.indices || to !in list.indices || from == to) return
+        list.add(to, list.removeAt(from))
+        queueEntries = list
+        queueIndex = when {
+            from == queueIndex -> to
+            from < queueIndex && to >= queueIndex -> queueIndex - 1
+            from > queueIndex && to <= queueIndex -> queueIndex + 1
+            else -> queueIndex
+        }
+    }
+
+    /** Removes an upcoming/played item; the currently playing slot can't be removed. */
+    fun removeQueueItem(index: Int) {
+        if (index !in queueEntries.indices || index == queueIndex) return
+        queueEntries = queueEntries.toMutableList().also { it.removeAt(index) }
+        if (index < queueIndex) queueIndex--
+    }
+
+    fun playQueueIndex(index: Int) {
+        val entry = queueEntries.getOrNull(index) ?: return
+        if (index == queueIndex) {
+            togglePlayPause()
+            return
+        }
+        queueIndex = index
+        PlayHistoryRepository.record(entry.track)
+        PlayStatsRepository.record(entry.track)
+        loadAndPlay(entry.track)
+    }
+
+    /** In offline mode only downloaded tracks can be played, so the rest are skipped. */
+    private fun isPlayable(entry: QueueEntry): Boolean =
+        !com.gammatunes.app.offline.OfflineModeRepository.enabled.value ||
+            OfflineRepository.isDownloaded(entry.track.videoId)
+
+    private fun nextPlayableIndex(): Int =
+        if (queueIndex < 0) -1 else (queueIndex + 1 until queueEntries.size).firstOrNull { isPlayable(queueEntries[it]) } ?: -1
+
+    private fun previousPlayableIndex(): Int =
+        if (queueIndex <= 0) -1 else (queueIndex - 1 downTo 0).firstOrNull { isPlayable(queueEntries[it]) } ?: -1
 
     val hasNext: Boolean
-        get() = queueIndex in 0 until queue.size - 1
+        get() = nextPlayableIndex() >= 0
     val hasPrevious: Boolean
-        get() = queueIndex > 0 && queue.isNotEmpty()
+        get() = previousPlayableIndex() >= 0
 
 
     val positionMs: Long
@@ -165,7 +244,7 @@ class PlayerState(private val context: Context, private val scope: CoroutineScop
     }
 
     fun play(track: Track, queue: List<Track> = listOf(track)) {
-        this.queue = queue
+        this.queueEntries = queue.map { QueueEntry(nextQueueUid++, it) }
         this.queueIndex = queue.indexOfFirst { it.videoId == track.videoId }.let {
             if (it >= 0) it else 0
         }
@@ -179,8 +258,9 @@ class PlayerState(private val context: Context, private val scope: CoroutineScop
     }
 
     fun playNext() {
-        if (!hasNext) return
-        queueIndex++
+        val next = nextPlayableIndex()
+        if (next < 0) return
+        queueIndex = next
         val t = queue[queueIndex]
         PlayHistoryRepository.record(t)
         PlayStatsRepository.record(t)
@@ -188,8 +268,9 @@ class PlayerState(private val context: Context, private val scope: CoroutineScop
     }
 
     fun playPrevious() {
-        if (!hasPrevious) return
-        queueIndex--
+        val previous = previousPlayableIndex()
+        if (previous < 0) return
+        queueIndex = previous
         val t = queue[queueIndex]
         PlayHistoryRepository.record(t)
         PlayStatsRepository.record(t)
@@ -262,13 +343,16 @@ class PlayerState(private val context: Context, private val scope: CoroutineScop
                     setReadTimeoutMs(20_000)
                 }
                 val item = mediaItemFor(track, android.net.Uri.parse(stream.streamUrl))
-                val mediaSource = ProgressiveMediaSource.Factory(dataSourceFactory)
-                    .createMediaSource(item)
+                val mediaSource = if (stream.isHls) {
+                    HlsMediaSource.Factory(dataSourceFactory).createMediaSource(item)
+                } else {
+                    ProgressiveMediaSource.Factory(dataSourceFactory).createMediaSource(item)
+                }
                 player.setMediaSource(mediaSource, resumePositionMs)
                 player.prepare()
                 player.playWhenReady = true
             } catch (e: Exception) {
-                streamError = e.message ?: "Не удалось получить аудиопоток"
+                streamError = e.backendMessage().ifBlank { "Не удалось получить аудиопоток" }
             } finally {
                 isLoadingStream = false
             }

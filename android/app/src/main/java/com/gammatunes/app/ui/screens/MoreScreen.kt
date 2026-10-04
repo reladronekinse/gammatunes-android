@@ -24,6 +24,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import com.gammatunes.app.auth.AuthRepository
+import com.gammatunes.app.auth.SoundCloudAuthRepository
 import com.gammatunes.app.offline.OfflineRepository
 import com.gammatunes.app.player.AudioQuality
 import com.gammatunes.app.player.PlaybackSettingsRepository
@@ -48,7 +49,9 @@ fun MoreScreen(
     val strings = LocalStrings.current
     val context = LocalContext.current
     val language by LocaleRepository.language.collectAsState()
-    val isLoggedIn by AuthRepository.isLoggedIn.collectAsState()
+    val ytmLoggedIn by AuthRepository.isLoggedIn.collectAsState()
+    val scLoggedIn by SoundCloudAuthRepository.isLoggedIn.collectAsState()
+    val isLoggedIn = ytmLoggedIn || scLoggedIn
     val offlineIndex by OfflineRepository.index.collectAsState()
     val offlineAlbums by OfflineRepository.albums.collectAsState()
     val playbackSettings by PlaybackSettingsRepository.settings.collectAsState()
@@ -58,7 +61,7 @@ fun MoreScreen(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 16.dp),
-        contentPadding = PaddingValues(top = 16.dp, bottom = 120.dp),
+        contentPadding = PaddingValues(top = 16.dp, bottom = 300.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item {
@@ -217,7 +220,7 @@ fun MoreScreen(
                     val versionName = remember {
                         runCatching {
                             context.packageManager.getPackageInfo(context.packageName, 0).versionName
-                        }.getOrNull() ?: "0.4-unstable"
+                        }.getOrNull() ?: "0.4-stable"
                     }
                     Text(
                         text = strings.versionLabel.format(versionName),
@@ -227,12 +230,6 @@ fun MoreScreen(
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = strings.licenseLabel,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = strings.aboutBody,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

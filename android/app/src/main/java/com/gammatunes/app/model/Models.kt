@@ -13,7 +13,14 @@ data class Track(
     val artistId: String? = null,
     /** True for YouTube videos (not music catalogue songs). Player shows video surface. */
     val isVideo: Boolean = false,
-)
+) {
+    /** True for tracks coming from SoundCloud (backend ids look like "sc_<id>"). */
+    val isSoundCloud: Boolean get() = videoId.startsWith(SOUNDCLOUD_ID_PREFIX)
+
+    companion object {
+        const val SOUNDCLOUD_ID_PREFIX = "sc_"
+    }
+}
 
 data class Album(
     val albumId: String,
@@ -55,6 +62,8 @@ data class StreamResponse(
     val quality: String = "high",
     val httpHeaders: Map<String, String> = emptyMap(),
     val isVideoStream: Boolean = false,
+    /** True when [streamUrl] is an HLS playlist (some SoundCloud tracks). */
+    val isHls: Boolean = false,
 )
 
 data class AuthStatusResponse(
@@ -81,6 +90,8 @@ data class PlaylistSummary(
     val title: String,
     val thumbnail: String? = null,
     val count: Int? = null,
+    /** SoundCloud only: someone else's playlist you liked (tracks can't be added to it). */
+    val readOnly: Boolean = false,
 )
 
 data class PlaylistsResponse(
@@ -92,6 +103,12 @@ data class PlaylistTracksResponse(
     val title: String,
     val tracks: List<Track> = emptyList(),
 )
+
+/** Id prefixes the backend uses for SoundCloud users ("artists") and playlists/albums. */
+const val SOUNDCLOUD_USER_PREFIX = "scu_"
+const val SOUNDCLOUD_PLAYLIST_PREFIX = "scp_"
+
+fun String.isSoundCloudArtistId(): Boolean = startsWith(SOUNDCLOUD_USER_PREFIX)
 
 data class LyricsApiResponse(
     val ok: Boolean = false,

@@ -25,7 +25,7 @@ import com.gammatunes.app.model.AlbumTracksResponse
 import com.gammatunes.app.model.Track
 import com.gammatunes.app.network.ApiClient
 import com.gammatunes.app.offline.OfflineRepository
-import com.gammatunes.app.ui.components.DownloadButton
+import com.gammatunes.app.ui.components.TrackContextMenu
 import kotlinx.coroutines.launch
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.DownloadDone
@@ -129,48 +129,38 @@ fun AlbumDetailScreen(
 
 @Composable
 private fun AlbumTrackRow(number: Int, track: Track, onClick: () -> Unit) {
-    var showDownload by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
-    val index by OfflineRepository.index.collectAsState()
-    val downloadingIds by OfflineRepository.downloadingIds.collectAsState()
-    val isDownloaded = index.containsKey(track.videoId)
-    val isDownloading = downloadingIds.contains(track.videoId)
+    var showMenu by remember { mutableStateOf(false) }
 
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .combinedClickable(
-                onClick = onClick,
-                onLongClick = { showDownload = true },
+    Box {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .combinedClickable(
+                    onClick = onClick,
+                    onLongClick = { showMenu = true },
+                )
+                .padding(horizontal = 4.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = number.toString(),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.width(28.dp),
             )
-            .padding(horizontal = 4.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = number.toString(),
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.width(28.dp),
-        )
-        Text(
-            text = track.title,
-            style = MaterialTheme.typography.bodyLarge,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
-        )
-        if (showDownload || isDownloading || isDownloaded) {
-            DownloadButton(track = track)
+            Text(
+                text = track.title,
+                style = MaterialTheme.typography.bodyLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
         }
-    }
-
-    if (showDownload && !isDownloaded && !isDownloading) {
-
-        LaunchedEffect(track.videoId) {
-            OfflineRepository.download(track)
-            kotlinx.coroutines.delay(2500)
-            showDownload = false
-        }
+        TrackContextMenu(
+            track = track,
+            expanded = showMenu,
+            onDismiss = { showMenu = false },
+        )
     }
 }
 

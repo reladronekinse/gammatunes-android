@@ -27,8 +27,10 @@ import coil.compose.AsyncImage
 import com.gammatunes.app.ui.components.ZoomableImage
 import com.gammatunes.app.model.Album
 import com.gammatunes.app.model.Artist
+import com.gammatunes.app.model.isSoundCloudArtistId
 import com.gammatunes.app.network.ApiClient
 import com.gammatunes.app.ui.components.LiquidGlassSurface
+import com.gammatunes.app.ui.components.TrackContextMenu
 import com.gammatunes.app.ui.i18n.LocalStrings
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -203,7 +205,10 @@ fun ArtistDetailScreen(
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Text(
-                                        text = strings.singlesCount.format(loadedArtist.singles.size),
+                                        text = (
+                                            if (artistId.isSoundCloudArtistId()) strings.soundCloudPlaylistsCount
+                                            else strings.singlesCount
+                                        ).format(loadedArtist.singles.size),
                                         style = MaterialTheme.typography.titleMedium,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
@@ -352,59 +357,51 @@ fun AlbumRow(album: Album, onClick: () -> Unit) {
 
 @Composable
 private fun PopularTrackRow(track: com.gammatunes.app.model.Track, onClick: () -> Unit) {
-    var showDownload by remember { mutableStateOf(false) }
-    val index by com.gammatunes.app.offline.OfflineRepository.index.collectAsState()
-    val downloadingIds by com.gammatunes.app.offline.OfflineRepository.downloadingIds.collectAsState()
-    val isDownloaded = index.containsKey(track.videoId)
-    val isDownloading = downloadingIds.contains(track.videoId)
+    var showMenu by remember { mutableStateOf(false) }
 
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .combinedClickable(
-                onClick = onClick,
-                onLongClick = { showDownload = true },
-            )
-            .padding(vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        AsyncImage(
-            model = track.thumbnail,
-            contentDescription = track.title,
+    Box {
+        Row(
             modifier = Modifier
-                .size(48.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-        )
-        Spacer(Modifier.width(12.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = track.title,
-                style = MaterialTheme.typography.bodyLarge,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+                .fillMaxWidth()
+                .combinedClickable(
+                    onClick = onClick,
+                    onLongClick = { showMenu = true },
+                )
+                .padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            AsyncImage(
+                model = track.thumbnail,
+                contentDescription = track.title,
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
             )
-            if (!track.album.isNullOrBlank()) {
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = track.album!!,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    text = track.title,
+                    style = MaterialTheme.typography.bodyLarge,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+                if (!track.album.isNullOrBlank()) {
+                    Text(
+                        text = track.album!!,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
-        if (showDownload || isDownloading || isDownloaded) {
-            com.gammatunes.app.ui.components.DownloadButton(track = track)
-        }
-    }
-
-    if (showDownload && !isDownloaded && !isDownloading) {
-        LaunchedEffect(track.videoId) {
-            com.gammatunes.app.offline.OfflineRepository.download(track)
-            kotlinx.coroutines.delay(2500)
-            showDownload = false
-        }
+        TrackContextMenu(
+            track = track,
+            expanded = showMenu,
+            onDismiss = { showMenu = false },
+        )
     }
 }

@@ -4,6 +4,9 @@ import android.content.Context
 import android.util.Log
 import com.gammatunes.app.model.Track
 import com.gammatunes.app.network.ApiClient
+import com.gammatunes.app.network.backendMessage
+import com.gammatunes.app.backend.LocalBackend
+import okhttp3.RequestBody.Companion.toRequestBody
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import kotlinx.coroutines.CoroutineScope
@@ -286,7 +289,7 @@ object OfflineRepository {
         val stream = try {
             ApiClient.api.stream(videoId)
         } catch (t: Throwable) {
-            throw java.io.IOException("Не удалось получить stream: ${t.message}", t)
+            throw java.io.IOException("Не удалось получить stream: ${t.backendMessage()}", t)
         }
         if (stream.streamUrl.isBlank()) {
             throw java.io.IOException("Пустой streamUrl")
@@ -297,9 +300,17 @@ object OfflineRepository {
         val tmpFile = File(offlineDir(), "$videoId.$extension.part")
         if (tmpFile.exists()) tmpFile.delete()
 
-        val reqBuilder = Request.Builder().url(stream.streamUrl)
+        // HLS tracks are a playlist of segments, so a plain byte copy would save
+        // the playlist text. Let the embedded backend (yt-dlp) assemble the file.
+        val reqBuilder = if (stream.isHls) {
+            Request.Builder()
+                .url("${LocalBackend.BASE_URL}download/$videoId")
+                .post(ByteArray(0).toRequestBody())
+        } else {
+            Request.Builder().url(stream.streamUrl)
+        }
         var hasUa = false
-        for ((k, v) in stream.httpHeaders) {
+        for ((k, v) in (if (stream.isHls) emptyMap() else stream.httpHeaders)) {
             try {
                 reqBuilder.header(k, v)
                 if (k.equals("User-Agent", ignoreCase = true)) hasUa = true

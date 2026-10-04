@@ -1,7 +1,8 @@
 package com.gammatunes.app.ui.screens
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -14,6 +15,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -22,8 +26,8 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.gammatunes.app.model.Track
 import com.gammatunes.app.offline.OfflineRepository
-import com.gammatunes.app.ui.components.DownloadButton
 import com.gammatunes.app.ui.components.LiquidGlassSurface
+import com.gammatunes.app.ui.components.TrackContextMenu
 
 @Composable
 fun OfflineScreen(onTrackClick: (Track, List<Track>) -> Unit) {
@@ -72,47 +76,57 @@ fun OfflineScreen(onTrackClick: (Track, List<Track>) -> Unit) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun OfflineTrackRow(track: Track, onClick: () -> Unit) {
-    LiquidGlassSurface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
-        shape = RoundedCornerShape(16.dp),
-    ) {
-        Row(
+    var showMenu by remember { mutableStateOf(false) }
+
+    Box {
+        LiquidGlassSurface(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(10.dp),
-            verticalAlignment = Alignment.CenterVertically,
+                .combinedClickable(
+                    onClick = onClick,
+                    onLongClick = { showMenu = true },
+                ),
+            shape = RoundedCornerShape(16.dp),
         ) {
-            AsyncImage(
-                model = track.thumbnail,
-                contentDescription = track.title,
+            Row(
                 modifier = Modifier
-                    .size(56.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
-            )
-            Spacer(Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = track.title,
-                    style = MaterialTheme.typography.titleMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                    .fillMaxWidth()
+                    .padding(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AsyncImage(
+                    model = track.thumbnail,
+                    contentDescription = track.title,
+                    modifier = Modifier
+                        .size(56.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
                 )
-                Text(
-                    text = track.artist,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = track.title,
+                        style = MaterialTheme.typography.titleMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = track.artist,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
-
-
-            DownloadButton(track = track)
         }
+        TrackContextMenu(
+            track = track,
+            expanded = showMenu,
+            onDismiss = { showMenu = false },
+        )
     }
 }

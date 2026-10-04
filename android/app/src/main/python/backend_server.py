@@ -12,6 +12,8 @@ from urllib.parse import parse_qs, urlparse
 import yt_dlp
 from ytmusicapi import YTMusic, setup
 
+import sc_account
+
 def _android_files_dir() -> str:
 
     try:
@@ -538,6 +540,8 @@ _VIDEO_FORMAT = (
 
 
 def _extract_stream(video_id: str, quality: str | None = None, want_video: bool = False) -> dict:
+    if _is_sc_id(video_id):
+        return _extract_sc_stream(video_id)
     quality = _normalize_quality(quality)
     cache_key = f"{video_id}:{'video' if want_video else quality}"
     with _stream_cache_lock:
@@ -619,13 +623,13 @@ def _download_audio_file(video_id: str) -> tuple[str, str, str]:
         shutil.rmtree(work, ignore_errors=True)
     os.makedirs(work, exist_ok=True)
 
-    url = f"https://music.youtube.com/watch?v={video_id}"
+    url = _sc_track_url(video_id) if _is_sc_id(video_id) else f"https://music.youtube.com/watch?v={video_id}"
     outtmpl = os.path.join(work, f"{video_id}.%(ext)s")
     last_err: Exception | None = None
 
     try:
         ydl_opts = {
-            "format": "bestaudio/best",
+            "format": _SC_AUDIO_FORMAT if _is_sc_id(video_id) else "bestaudio/best",
             "outtmpl": outtmpl,
             "quiet": True,
             "no_warnings": True,
@@ -665,6 +669,8 @@ def _download_audio_file(video_id: str) -> tuple[str, str, str]:
 
     try:
         stream = _extract_stream(video_id)
+        if stream.get("isHls"):
+            raise ValueError("stream fallback can't download HLS")
         stream_url = stream["streamUrl"]
         headers = dict(stream.get("httpHeaders") or {})
         if "User-Agent" not in headers and "user-agent" not in headers:
@@ -722,6 +728,235 @@ def _to_playlist(item: dict) -> dict | None:
         "count": count_i,
     }
 
+# ---------------------------------------------------------------------------
+# SoundCloud (second music source)
+#
+# SoundCloud tracks are exposed to the app with the same Track shape as YTM
+# ones; the only difference is the id, which is "sc_<numeric track id>".
+# Search and stream resolution go through yt-dlp's built-in SoundCloud
+# extractor, so no extra Python dependency is needed.
+# ---------------------------------------------------------------------------
+
+_SC_PREFIX = "sc_"
+_SC_ARTWORK_RE = re.compile(
+    r"-(?:mini|tiny|small|badge|t67x67|large|t300x300|crop|t500x500|original)\.\w+$"
+)
+# Prefer a plain progressive file (simplest to play and to download). Many
+# SoundCloud tracks only have HLS, so fall back to HLS mp3/aac. Opus-in-Ogg HLS
+# is deliberately excluded: ExoPlayer's HLS source can't play it.
+_SC_AUDIO_FORMAT = "bestaudio[protocol^=http]/bestaudio[ext=mp3]/bestaudio[ext=m4a]"
+_SC_STREAM_TTL_SECONDS = 20 * 60
+
+
+def _is_sc_id(video_id: str | None) -> bool:
+    return bool(video_id) and video_id.startswith(_SC_PREFIX)
+
+
+def _sc_track_url(video_id: str) -> str:
+    track_id = video_id[len(_SC_PREFIX):]
+    if not track_id.isdigit():
+        raise ValueError(f"Invalid SoundCloud track id: {video_id}")
+    return f"https://api.soundcloud.com/tracks/{track_id}"
+
+
+def _sc_fast_thumbnails(info: dict) -> list[dict] | None:
+    """Replacement for the extractor's thumbnail builder.
+
+    The stock one sends a HEAD request per result to probe the "original"
+    artwork, which makes a 25-result search noticeably slow. We only need
+    the 500x500 variant, which can be derived from the artwork URL.
+    """
+    url = info.get("artwork_url") or (info.get("user") or {}).get("avatar_url")
+    if not url:
+        return None
+    if _SC_ARTWORK_RE.search(url):
+        url = _SC_ARTWORK_RE.sub("-t500x500.jpg", url)
+    return [{"id": "t500x500", "url": url}]
+
+
+def _sc_to_track(entry: dict) -> dict | None:
+    track_id = entry.get("id")
+    if not track_id:
+        return None
+    thumb = None
+    thumbs = entry.get("thumbnails") or []
+    for t in thumbs:
+        if t.get("id") == "t500x500" and t.get("url"):
+            thumb = t["url"]
+            break
+    if thumb is None and thumbs:
+        thumb = thumbs[-1].get("url")
+    if thumb is None:
+        thumb = entry.get("thumbnail")
+    uploader_id = str(entry.get("uploader_id") or "")
+    return {
+        "videoId": f"{_SC_PREFIX}{track_id}",
+        "title": entry.get("title") or "Unknown",
+        "artist": entry.get("uploader") or entry.get("channel") or "Unknown",
+        "album": None,
+        "albumId": None,
+        "thumbnail": thumb,
+        "durationSeconds": _parse_duration_seconds(entry),
+        "artistId": f"{sc_account.USER_PREFIX}{uploader_id}" if uploader_id.isdigit() else None,
+        "isVideo": False,
+    }
+
+
+def _search_soundcloud(query: str, limit: int) -> list[dict]:
+    limit = max(1, min(50, limit))
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": True,
+        "skip_download": True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        try:
+            ie = ydl.get_info_extractor("SoundcloudSearch")
+            ie._extract_thumbnails = _sc_fast_thumbnails
+        except Exception as exc:  # extractor internals changed: just be slower
+            print(f"[ytm-backend] soundcloud thumbnail patch skipped: {exc!r}")
+        info = ydl.extract_info(f"scsearch{limit}:{query}", download=False)
+
+    tracks: list[dict] = []
+    seen: set[str] = set()
+    for entry in (info or {}).get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        tr = _sc_to_track(entry)
+        if tr and tr["videoId"] not in seen:
+            seen.add(tr["videoId"])
+            tracks.append(tr)
+    return tracks
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _clean_ytdlp_error(exc: BaseException) -> str:
+    """Short, single-line, human-readable text for a yt-dlp failure."""
+    raw = _ANSI_RE.sub("", str(exc))
+    raw = re.sub(r"^\s*ERROR:\s*", "", raw.strip())
+    raw = re.sub(r"\[\w[\w:]*\]\s*\d*:?\s*", "", raw, count=1)  # "[soundcloud] 123:"
+    text = " ".join(raw.split())
+    low = text.lower()
+    if "drm" in low:
+        hint = "Трек защищён DRM (SoundCloud Go+), воспроизвести его нельзя."
+    elif "geo" in low or "not available in your country" in low or "blocked" in low:
+        hint = "Трек недоступен в вашем регионе."
+    elif "requested format is not available" in low or "no playable" in low:
+        hint = "У трека нет доступного аудиопотока (возможно, только платный Go+)."
+    elif "429" in low or "rate limit" in low:
+        hint = "SoundCloud ограничил запросы, попробуйте через минуту."
+    elif "403" in low or "401" in low:
+        hint = "SoundCloud отказал в доступе к треку."
+    else:
+        hint = ""
+    return (f"{hint} ({text[:160]})" if hint else text[:220]).strip()
+
+
+def _extract_sc_stream(video_id: str) -> dict:
+    cache_key = f"{video_id}:soundcloud"
+    with _stream_cache_lock:
+        cached = _stream_cache.get(cache_key)
+        if cached is not None:
+            expires_at, cached_result = cached
+            if time.time() < expires_at:
+                return cached_result
+
+    ydl_opts = {
+        "format": _SC_AUDIO_FORMAT,
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(_sc_track_url(video_id), download=False)
+
+    fmt = info
+    if "url" not in fmt:
+        usable = [
+            f for f in (info.get("formats") or [])
+            if f.get("url") and f.get("acodec") != "none" and f.get("ext") in ("mp3", "m4a")
+        ]
+        if not usable:
+            raise ValueError("No playable SoundCloud audio format found for this track")
+        # progressive first, then highest bitrate
+        fmt = max(
+            usable,
+            key=lambda f: (
+                str(f.get("protocol") or "").startswith("http"),
+                f.get("abr") or f.get("tbr") or 0,
+            ),
+        )
+
+    is_hls = "m3u8" in str(fmt.get("protocol") or "") or ".m3u8" in fmt["url"]
+    result = {
+        "videoId": video_id,
+        "streamUrl": fmt["url"],
+        "mimeType": fmt.get("ext") or "mp3",
+        "bitrate": int(fmt.get("abr") or fmt.get("tbr") or 0),
+        "quality": "high",
+        "httpHeaders": dict(fmt.get("http_headers") or info.get("http_headers") or {}),
+        "isVideoStream": False,
+        "isHls": is_hls,
+    }
+    with _stream_cache_lock:
+        _stream_cache[cache_key] = (time.time() + _SC_STREAM_TTL_SECONDS, result)
+    return result
+
+
+def _recommendations(seeds: list, artists: list, source: str, limit: int) -> list:
+    """Personalised picks across both sources. YouTube Music radio runs for every
+    YTM seed track; SoundCloud search runs for the given artists. Results are
+    interleaved, de-duplicated and exclude the seeds. `source` ("ytm" /
+    "soundcloud") restricts the mix; anything else uses both."""
+    use_ytm = source != "soundcloud"
+    use_sc = source != "ytm"
+    batches: list[list[dict]] = []
+
+    if use_sc:
+        for name in artists[:2]:
+            try:
+                batches.append(_search_soundcloud(name, min(limit, 15)))
+            except Exception as exc:
+                print(f"[ytm-backend] sc recs failed for {name!r}: {exc!r}")
+    if use_ytm:
+        yt = _get_yt()
+        for vid in [v for v in seeds if v and not _is_sc_id(v)][:3]:
+            try:
+                wp = yt.get_watch_playlist(videoId=vid, radio=True, limit=limit)
+            except Exception as exc:
+                print(f"[ytm-backend] radio failed for {vid}: {exc!r}")
+                continue
+            items = []
+            for t in wp.get("tracks") or []:
+                t = dict(t)
+                t.setdefault("thumbnails", t.get("thumbnail"))
+                if not t.get("duration") and t.get("length"):
+                    t["duration"] = t["length"]
+                items.append(_to_track(t, is_video=False))
+            batches.append([t for t in items if t])
+        if not batches:
+            # No usable seeds: fall back to the artists' songs, then to generic hits.
+            for name in (artists[:2] or ["top hits"]):
+                try:
+                    raw = yt.search(name, filter="songs", limit=limit)
+                    batches.append([t for t in (_to_track(i, is_video=False) for i in raw) if t])
+                except Exception as exc:
+                    print(f"[ytm-backend] fallback recs failed for {name!r}: {exc!r}")
+
+    seen = set(seeds)
+    out: list[dict] = []
+    for i in range(max((len(b) for b in batches), default=0)):
+        for b in batches:
+            tr = b[i] if i < len(b) else None
+            if tr and tr["videoId"] not in seen:
+                seen.add(tr["videoId"])
+                out.append(tr)
+    return out[:limit]
+
+
 class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -739,6 +974,16 @@ class _Handler(BaseHTTPRequestHandler):
     def _send_error_json(self, status: int, message: str) -> None:
         self._send_json(status, {"detail": message})
 
+    def _send_sc_error(self, exc: BaseException) -> None:
+        """Map a SoundCloud failure to an HTTP status + readable `detail`."""
+        print(f"[sc-backend] {type(exc).__name__}: {exc}")
+        if isinstance(exc, sc_account.ScAuthError):
+            self._send_error_json(401, str(exc))
+        elif isinstance(exc, ValueError):
+            self._send_error_json(400, str(exc))
+        else:
+            self._send_error_json(502, f"SoundCloud: {exc}")
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
@@ -749,6 +994,17 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(200, {"status": "ok"})
                 return
 
+            if path == "/recommendations":
+                limit = max(1, min(int((qs.get("limit") or ["30"])[0]), 60))
+                src = (qs.get("source") or ["all"])[0].lower()
+                try:
+                    recs = _recommendations(qs.get("seed") or [], qs.get("artist") or [], src, limit)
+                except Exception as exc:
+                    self._send_error_json(502, f"Recommendations failed: {exc}")
+                    return
+                self._send_json(200, {"results": recs})
+                return
+
             if path == "/search/artists":
 
                 q = (qs.get("q") or [""])[0]
@@ -756,6 +1012,12 @@ class _Handler(BaseHTTPRequestHandler):
                     self._send_error_json(400, "q is required")
                     return
                 limit = int((qs.get("limit") or ["20"])[0])
+                if (qs.get("source") or ["ytm"])[0].lower() == "soundcloud":
+                    try:
+                        self._send_json(200, {"artists": sc_account.search_artists(q, limit)})
+                    except Exception as exc:
+                        self._send_sc_error(exc)
+                    return
                 try:
                     raw = _get_yt().search(q, filter="artists", limit=limit)
                 except Exception as exc:
@@ -782,6 +1044,12 @@ class _Handler(BaseHTTPRequestHandler):
                 if not artist_id:
                     self._send_error_json(400, "artistId is required")
                     return
+                if artist_id.startswith(sc_account.USER_PREFIX):
+                    try:
+                        self._send_json(200, sc_account.artist_detail(artist_id))
+                    except Exception as exc:
+                        self._send_sc_error(exc)
+                    return
                 artist = _artist_detail(artist_id)
                 if artist is None:
                     self._send_error_json(502, "YTMusic artist fetch failed")
@@ -793,6 +1061,12 @@ class _Handler(BaseHTTPRequestHandler):
                 album_id = path[len("/albums/"):]
                 if not album_id:
                     self._send_error_json(400, "albumId is required")
+                    return
+                if album_id.startswith(sc_account.PLAYLIST_PREFIX):
+                    try:
+                        self._send_json(200, sc_account.album_detail(album_id))
+                    except Exception as exc:
+                        self._send_sc_error(exc)
                     return
                 try:
                     album = _get_yt().get_album(album_id)
@@ -838,6 +1112,14 @@ class _Handler(BaseHTTPRequestHandler):
                     self._send_error_json(400, "q is required")
                     return
                 limit = int((qs.get("limit") or ["25"])[0])
+                if (qs.get("source") or ["ytm"])[0].lower() == "soundcloud":
+                    try:
+                        sc_tracks = _search_soundcloud(q, limit)
+                    except Exception as exc:
+                        self._send_error_json(502, f"SoundCloud search failed: {exc}")
+                        return
+                    self._send_json(200, {"results": sc_tracks})
+                    return
                 try:
                     yt = _get_yt()
                     raw_songs = yt.search(q, filter="songs", limit=limit)
@@ -873,12 +1155,19 @@ class _Handler(BaseHTTPRequestHandler):
                 try:
                     result = _extract_stream(video_id, quality, want_video=want_video)
                 except Exception as exc:
-                    self._send_error_json(502, f"Stream extraction failed: {exc}")
+                    print(f"[ytm-backend] stream failed for {video_id}: {exc!r}")
+                    self._send_error_json(502, f"Stream extraction failed: {_clean_ytdlp_error(exc)}")
                     return
                 self._send_json(200, result)
                 return
 
             if path == "/auth/status":
+                if (qs.get("source") or ["ytm"])[0].lower() == "soundcloud":
+                    self._send_json(200, {
+                        "loggedIn": sc_account.is_logged_in(),
+                        "accountName": sc_account.account_name(),
+                    })
+                    return
                 self._send_json(200, {
                     "loggedIn": _auth_json is not None,
                     "accountName": _auth_account_hint,
@@ -993,6 +1282,16 @@ class _Handler(BaseHTTPRequestHandler):
                 return
 
             if path == "/liked":
+                if (qs.get("source") or ["ytm"])[0].lower() == "soundcloud":
+                    try:
+                        sc_limit = max(1, min(10000, int((qs.get("limit") or ["5000"])[0])))
+                    except Exception:
+                        sc_limit = 5000
+                    try:
+                        self._send_json(200, {"results": sc_account.liked(sc_limit)})
+                    except Exception as exc:
+                        self._send_sc_error(exc)
+                    return
                 if _auth_json is None and not _auth_file_path:
                     self._send_error_json(401, "Not authenticated")
                     return
@@ -1026,6 +1325,16 @@ class _Handler(BaseHTTPRequestHandler):
                 return
 
             if path == "/playlists":
+                if (qs.get("source") or ["ytm"])[0].lower() == "soundcloud":
+                    try:
+                        sc_pl_limit = max(1, min(500, int((qs.get("limit") or ["100"])[0])))
+                    except Exception:
+                        sc_pl_limit = 100
+                    try:
+                        self._send_json(200, {"playlists": sc_account.playlists(sc_pl_limit)})
+                    except Exception as exc:
+                        self._send_sc_error(exc)
+                    return
                 if _auth_json is None and not _auth_file_path:
                     self._send_error_json(401, "Not authenticated")
                     return
@@ -1047,6 +1356,12 @@ class _Handler(BaseHTTPRequestHandler):
                 return
 
             if path.startswith("/playlists/"):
+                if path[len("/playlists/"):].startswith(sc_account.PLAYLIST_PREFIX):
+                    try:
+                        self._send_json(200, sc_account.playlist_tracks(path[len("/playlists/"):]))
+                    except Exception as exc:
+                        self._send_sc_error(exc)
+                    return
                 if _auth_json is None and not _auth_file_path:
                     self._send_error_json(401, "Not authenticated")
                     return
@@ -1124,7 +1439,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(200, {"playlists": playlists})
                 return
 
-            if path.startswith("/playlists/"):
+            # "/playlists/add" is a separate action route handled further below.
+            if path.startswith("/playlists/") and path != "/playlists/add":
                 if _auth_json is None and not _auth_file_path:
                     self._send_error_json(401, "Not authenticated")
                     return
@@ -1169,7 +1485,7 @@ class _Handler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     import traceback
                     print(f"[ytm-backend] download failed:\n{traceback.format_exc()}")
-                    self._send_error_json(502, f"download failed: {exc}")
+                    self._send_error_json(502, f"download failed: {_clean_ytdlp_error(exc)}")
                     return
                 import os
                 import shutil
@@ -1202,6 +1518,14 @@ class _Handler(BaseHTTPRequestHandler):
                         pass
                 return
 
+            if path == "/auth/login" and str(payload.get("source") or "").lower() == "soundcloud":
+                raw = payload.get("headersRaw") or payload.get("token") or ""
+                try:
+                    self._send_json(200, sc_account.login(str(raw)))
+                except Exception as exc:
+                    self._send_sc_error(exc)
+                return
+
             if path == "/auth/login":
                 raw = (
                     payload.get("headersRaw")
@@ -1230,18 +1554,33 @@ class _Handler(BaseHTTPRequestHandler):
                 return
 
             if path == "/auth/logout":
+                qs_post = parse_qs(parsed.query)
+                if (
+                    (qs_post.get("source") or [""])[0].lower() == "soundcloud"
+                    or str(payload.get("source") or "").lower() == "soundcloud"
+                ):
+                    sc_account.logout()
+                    self._send_json(200, {"ok": True})
+                    return
                 _clear_auth()
                 self._send_json(200, {"ok": True})
                 return
 
             if path == "/rate":
-                if _auth_json is None:
-                    self._send_error_json(401, "Not authenticated")
-                    return
                 video_id = payload.get("videoId") or ""
                 rating = (payload.get("rating") or "LIKE").upper()
                 if not video_id:
                     self._send_error_json(400, "videoId is required")
+                    return
+                if _is_sc_id(video_id):
+                    try:
+                        sc_account.rate(video_id, rating)
+                        self._send_json(200, {"ok": True, "videoId": video_id, "rating": rating})
+                    except Exception as exc:
+                        self._send_sc_error(exc)
+                    return
+                if _auth_json is None:
+                    self._send_error_json(401, "Not authenticated")
                     return
                 if rating not in ("LIKE", "DISLIKE", "INDIFFERENT"):
                     self._send_error_json(400, "rating must be LIKE, DISLIKE or INDIFFERENT")
@@ -1254,13 +1593,26 @@ class _Handler(BaseHTTPRequestHandler):
                 return
 
             if path == "/playlists/add":
-                if _auth_json is None:
-                    self._send_error_json(401, "Not authenticated")
-                    return
                 playlist_id = payload.get("playlistId") or ""
                 video_id = payload.get("videoId") or ""
                 if not playlist_id or not video_id:
                     self._send_error_json(400, "playlistId and videoId are required")
+                    return
+                if playlist_id.startswith(sc_account.PLAYLIST_PREFIX):
+                    if not _is_sc_id(video_id):
+                        self._send_error_json(400, "Only SoundCloud tracks can be added to SoundCloud playlists")
+                        return
+                    try:
+                        sc_account.add_to_playlist(playlist_id, video_id)
+                        self._send_json(200, {"ok": True, "playlistId": playlist_id, "videoId": video_id})
+                    except Exception as exc:
+                        self._send_sc_error(exc)
+                    return
+                if _auth_json is None:
+                    self._send_error_json(401, "Not authenticated")
+                    return
+                if _is_sc_id(video_id):
+                    self._send_error_json(400, "Only YouTube Music tracks can be added to YTM playlists")
                     return
                 try:
                     _get_yt().add_playlist_items(playlist_id, [video_id], duplicates=False)

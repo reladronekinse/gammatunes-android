@@ -19,6 +19,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.gammatunes.app.model.Album
+import com.gammatunes.app.model.isSoundCloudArtistId
 import com.gammatunes.app.network.ApiClient
 import com.gammatunes.app.ui.i18n.LocalStrings
 
@@ -40,7 +41,8 @@ fun ArtistAlbumsGridScreen(
 
     val sectionTitle = when (kind) {
         ArtistReleaseKind.ALBUMS -> strings.albumsSection
-        ArtistReleaseKind.SINGLES -> strings.singlesSection
+        ArtistReleaseKind.SINGLES ->
+            if (artistId.isSoundCloudArtistId()) strings.soundCloudPlaylistsSection else strings.singlesSection
     }
 
     LaunchedEffect(artistId, kind) {
@@ -94,7 +96,7 @@ fun ArtistAlbumsGridScreen(
             }
             else -> LazyVerticalGrid(
                 columns = GridCells.Adaptive(minSize = 140.dp),
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 120.dp),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 300.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
                 modifier = Modifier.fillMaxSize(),

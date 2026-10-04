@@ -28,6 +28,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Lyrics
@@ -88,7 +89,9 @@ import coil.compose.AsyncImage
 import com.gammatunes.app.player.PlayerBridge
 import android.view.TextureView
 import androidx.compose.ui.viewinterop.AndroidView
-import com.gammatunes.app.auth.AuthRepository
+import com.gammatunes.app.auth.MusicAccount
+import com.gammatunes.app.auth.SoundCloudAuthRepository
+import com.gammatunes.app.auth.accountFor
 import com.gammatunes.app.lyrics.LyricsRepository
 import com.gammatunes.app.lyrics.LyricsResult
 import com.gammatunes.app.lyrics.LyricLine
@@ -110,6 +113,7 @@ fun PlayerScreen(
     player: PlayerState,
     onArtistClick: (artistId: String) -> Unit = {},
     onAlbumClick: (albumId: String) -> Unit = {},
+    onOpenQueue: () -> Unit = {},
 ) {
     val strings = LocalStrings.current
     val track = player.currentTrack
@@ -286,7 +290,9 @@ fun PlayerScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(24.dp)
-                .padding(bottom = 16.dp),
+                // Keep the player visually centered in the space above the
+                // floating bottom dock instead of centering it behind the dock.
+                .padding(bottom = 200.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
         ) {
@@ -433,10 +439,14 @@ fun PlayerScreen(
                                 } else {
                                     scope.launch {
                                         try {
-                                            val found = com.gammatunes.app.network.ApiClient.api
-                                                .searchArtists(track.artist)
+                                            val source = if (track.isSoundCloud) "soundcloud" else null
+                                            val candidates = com.gammatunes.app.network.ApiClient.api
+                                                .searchArtists(track.artist, source)
                                                 .artists
-                                                .firstOrNull()
+                                            // Same-name accounts are common on SoundCloud: prefer an exact match.
+                                            val found = candidates.firstOrNull {
+                                                it.name.equals(track.artist, ignoreCase = true)
+                                            } ?: candidates.firstOrNull()
                                             if (found != null) {
                                                 onArtistClick(found.artistId)
                                             }
@@ -555,6 +565,8 @@ fun PlayerScreen(
 
             Spacer(Modifier.height(12.dp))
 
+            val actionBtnSize = 48.dp
+            val actionIconSize = 24.dp
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -562,8 +574,14 @@ fun PlayerScreen(
                 horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                LiquidGlassSurface(shape = RoundedCornerShape(50)) {
-                    IconButton(onClick = { player.cycleRepeatMode() }) {
+                LiquidGlassSurface(
+                    modifier = Modifier.size(actionBtnSize),
+                    shape = RoundedCornerShape(50),
+                ) {
+                    IconButton(
+                        onClick = { player.cycleRepeatMode() },
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
                         val isActive = player.repeatMode != RepeatMode.OFF
                         Icon(
                             imageVector = if (player.repeatMode == RepeatMode.ONE) {
@@ -576,6 +594,7 @@ fun PlayerScreen(
                                 RepeatMode.ALL -> strings.repeatAll
                                 RepeatMode.ONE -> strings.repeatOne
                             },
+                            modifier = Modifier.size(actionIconSize),
                             tint = if (isActive) {
                                 MaterialTheme.colorScheme.primary
                             } else {
@@ -584,9 +603,32 @@ fun PlayerScreen(
                         )
                     }
                 }
-                LiquidGlassSurface(shape = RoundedCornerShape(50)) {
-                    val isLoggedIn by AuthRepository.isLoggedIn.collectAsState()
-                    val liked by AuthRepository.likedTracks.collectAsState()
+                // Queue gets a wider pill-shaped target so the control does not look
+                // visually cramped while the other actions remain circular.
+                LiquidGlassSurface(
+                    modifier = Modifier
+                        .width(72.dp)
+                        .height(actionBtnSize),
+                    shape = RoundedCornerShape(50),
+                ) {
+                    IconButton(
+                        onClick = onOpenQueue,
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.PlaylistPlay,
+                            contentDescription = strings.openQueue,
+                            modifier = Modifier.size(28.dp),
+                        )
+                    }
+                }
+                LiquidGlassSurface(
+                    modifier = Modifier.size(actionBtnSize),
+                    shape = RoundedCornerShape(50),
+                ) {
+                    val account = accountFor(track)
+                    val isLoggedIn by account.isLoggedIn.collectAsState()
+                    val liked by account.likedTracks.collectAsState()
                     val isLiked = liked.any { it.videoId == track.videoId }
                     val likeScope = rememberCoroutineScope()
                     IconButton(
@@ -594,32 +636,44 @@ fun PlayerScreen(
                             if (!isLoggedIn) return@IconButton
                             likeScope.launch {
                                 if (isLiked) {
-                                    AuthRepository.unlikeTrack(track.videoId)
-                                    AuthRepository.refreshLiked()
+                                    account.unlikeTrack(track.videoId)
+                                    account.refreshLiked()
                                 } else {
-                                    AuthRepository.likeTrack(track.videoId)
-                                    AuthRepository.refreshLiked()
+                                    account.likeTrack(track.videoId)
+                                    account.refreshLiked()
                                 }
                             }
                         },
                         enabled = isLoggedIn,
+                        modifier = Modifier.fillMaxSize(),
                     ) {
                         Icon(
                             imageVector = if (isLiked) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                             contentDescription = if (isLiked) strings.unlike else strings.like,
+                            modifier = Modifier.size(actionIconSize),
                             tint = if (isLiked) MaterialTheme.colorScheme.primary else LocalContentColor.current,
                         )
                     }
                 }
-                LiquidGlassSurface(shape = RoundedCornerShape(50)) {
-                    DownloadButton(track = track, buttonSize = 48.dp, iconSize = 24.dp)
+                LiquidGlassSurface(
+                    modifier = Modifier.size(actionBtnSize),
+                    shape = RoundedCornerShape(50),
+                ) {
+                    DownloadButton(track = track, buttonSize = actionBtnSize, iconSize = actionIconSize)
                 }
                 if (lyricsEnabled) {
-                    LiquidGlassSurface(shape = RoundedCornerShape(50)) {
-                        IconButton(onClick = { showLyrics = !showLyrics }) {
+                    LiquidGlassSurface(
+                        modifier = Modifier.size(actionBtnSize),
+                        shape = RoundedCornerShape(50),
+                    ) {
+                        IconButton(
+                            onClick = { showLyrics = !showLyrics },
+                            modifier = Modifier.fillMaxSize(),
+                        ) {
                             Icon(
                                 imageVector = Icons.Default.Lyrics,
                                 contentDescription = strings.lyrics,
+                                modifier = Modifier.size(actionIconSize),
                                 tint = if (effectiveShowLyrics) {
                                     MaterialTheme.colorScheme.primary
                                 } else {
@@ -629,22 +683,29 @@ fun PlayerScreen(
                         }
                     }
                 }
-                LiquidGlassSurface(shape = RoundedCornerShape(50)) {
+                LiquidGlassSurface(
+                    modifier = Modifier.size(actionBtnSize),
+                    shape = RoundedCornerShape(50),
+                ) {
                     var showPlaylistPicker by remember { mutableStateOf(false) }
-                    val isLoggedIn by AuthRepository.isLoggedIn.collectAsState()
+                    val account = accountFor(track)
+                    val isLoggedIn by account.isLoggedIn.collectAsState()
                     IconButton(
                         onClick = {
                             if (isLoggedIn) showPlaylistPicker = true
                         },
                         enabled = isLoggedIn,
+                        modifier = Modifier.fillMaxSize(),
                     ) {
                         Icon(
                             Icons.Default.PlaylistAdd,
                             contentDescription = strings.addToPlaylist,
+                            modifier = Modifier.size(actionIconSize),
                         )
                     }
                     if (showPlaylistPicker) {
                         AddToPlaylistDialog(
+                            account = account,
                             videoId = track.videoId,
                             onDismiss = { showPlaylistPicker = false },
                         )
@@ -689,9 +750,26 @@ fun PlayerScreen(
                 Spacer(Modifier.height(16.dp))
                 CircularProgressIndicator()
             }
-            player.streamError?.let {
-                Spacer(Modifier.height(16.dp))
-                Text("${strings.errorPrefix}$it", color = MaterialTheme.colorScheme.error)
+        }
+
+        // The player Column above is a non-scrolling, full-screen layout whose
+        // cover art takes the whole width, so anything placed at its end gets
+        // clipped. Show the error as an overlay card pinned to the bottom instead.
+        player.streamError?.let { message ->
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.errorContainer,
+                contentColor = MaterialTheme.colorScheme.onErrorContainer,
+            ) {
+                Text(
+                    "${strings.errorPrefix}$message",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                )
             }
         }
     }
@@ -1005,18 +1083,21 @@ private fun EmptyPlayerPlaceholder() {
 
 @Composable
 private fun AddToPlaylistDialog(
+    account: MusicAccount,
     videoId: String,
     onDismiss: () -> Unit,
 ) {
     val strings = LocalStrings.current
-    val playlists by AuthRepository.playlists.collectAsState()
+    val allPlaylists by account.playlists.collectAsState()
+    // SoundCloud: playlists you only liked belong to someone else and can't be edited.
+    val playlists = allPlaylists.filter { !it.readOnly }
     val scope = rememberCoroutineScope()
     var loading by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
-        if (playlists.isEmpty()) {
-            AuthRepository.refreshPlaylists()
+        if (allPlaylists.isEmpty()) {
+            account.refreshPlaylists()
         }
     }
 
@@ -1033,7 +1114,8 @@ private fun AddToPlaylistDialog(
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                 } else if (playlists.isEmpty()) {
                     Text(
-                        strings.playlistsEmpty,
+                        if (account === SoundCloudAuthRepository) strings.soundCloudPlaylistsEmpty
+                        else strings.playlistsEmpty,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 } else {
@@ -1047,7 +1129,7 @@ private fun AddToPlaylistDialog(
                                     scope.launch {
                                         loading = true
                                         message = null
-                                        val ok = AuthRepository.addToPlaylist(pl.playlistId, videoId)
+                                        val ok = account.addToPlaylist(pl.playlistId, videoId)
                                         loading = false
                                         message = if (ok) {
                                             strings.addedToPlaylist

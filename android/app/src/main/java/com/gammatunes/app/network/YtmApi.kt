@@ -20,10 +20,24 @@ import retrofit2.http.Query
 interface YtmApi {
 
     @GET("search/artists")
-    suspend fun searchArtists(@Query("q") query: String): ArtistSearchResponse
+    suspend fun searchArtists(
+        @Query("q") query: String,
+        @Query("source") source: String? = null,
+    ): ArtistSearchResponse
 
     @GET("search")
-    suspend fun searchTracks(@Query("q") query: String): SearchResponse
+    suspend fun searchTracks(
+        @Query("q") query: String,
+        @Query("source") source: String? = null,
+    ): SearchResponse
+
+    @GET("recommendations")
+    suspend fun recommendations(
+        @Query("seed") seeds: List<String>,
+        @Query("artist") artists: List<String>,
+        @Query("source") source: String? = null,
+        @Query("limit") limit: Int = 30,
+    ): SearchResponse
 
     @GET("artists/{artistId}")
     suspend fun artistDetail(@Path("artistId") artistId: String): Artist
@@ -39,19 +53,25 @@ interface YtmApi {
     ): StreamResponse
 
     @GET("auth/status")
-    suspend fun authStatus(): AuthStatusResponse
+    suspend fun authStatus(@Query("source") source: String? = null): AuthStatusResponse
 
     @POST("auth/login")
     suspend fun authLogin(@Body body: Map<String, String>): AuthLoginResponse
 
     @POST("auth/logout")
-    suspend fun authLogout(): SimpleOkResponse
+    suspend fun authLogout(@Query("source") source: String? = null): SimpleOkResponse
 
     @GET("liked")
-    suspend fun likedSongs(@Query("limit") limit: Int = 5000): SearchResponse
+    suspend fun likedSongs(
+        @Query("limit") limit: Int = 5000,
+        @Query("source") source: String? = null,
+    ): SearchResponse
 
     @GET("playlists")
-    suspend fun libraryPlaylists(@Query("limit") limit: Int = 100): PlaylistsResponse
+    suspend fun libraryPlaylists(
+        @Query("limit") limit: Int = 100,
+        @Query("source") source: String? = null,
+    ): PlaylistsResponse
 
     @GET("playlists/{playlistId}")
     suspend fun playlistTracks(

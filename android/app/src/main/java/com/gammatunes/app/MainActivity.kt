@@ -17,10 +17,12 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
@@ -33,6 +35,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -64,11 +68,20 @@ import com.gammatunes.app.ui.screens.OfflineAlbumsScreen
 import com.gammatunes.app.ui.screens.TopTracksScreen
 import com.gammatunes.app.ui.screens.TopArtistsScreen
 import com.gammatunes.app.ui.screens.PlayerScreen
+import com.gammatunes.app.ui.screens.HomeScreen
+import com.gammatunes.app.ui.screens.QueueScreen
+import com.gammatunes.app.ui.components.LiquidGlassSurface
+import com.gammatunes.app.player.LocalPlayerState
+import com.gammatunes.app.network.NetworkMonitor
+import com.gammatunes.app.offline.OfflineModeRepository
 import com.gammatunes.app.ui.screens.SearchScreen
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.collectAsState
 import com.gammatunes.app.ui.theme.DynamicAccent
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import com.gammatunes.app.ui.i18n.LocalLanguage
 import com.gammatunes.app.ui.i18n.LocalStrings
 import com.gammatunes.app.ui.i18n.LocaleRepository
@@ -107,12 +120,13 @@ class MainActivity : ComponentActivity() {
 }
 
 private sealed class Screen(val route: String, val icon: ImageVector) {
+    data object Home : Screen("home", Icons.Default.Home)
     data object Search : Screen("search", Icons.Default.Search)
     data object Player : Screen("player", Icons.Default.MusicNote)
     data object More : Screen("more", Icons.Default.MoreHoriz)
 }
 
-private val bottomTabs = listOf(Screen.Search, Screen.Player, Screen.More)
+private val bottomTabs = listOf(Screen.Home, Screen.Search, Screen.Player, Screen.More)
 
 @Composable
 fun App() {
@@ -145,7 +159,7 @@ private fun AppContent() {
         }
     }
 
-    val mainTabRoutes = setOf(Screen.Search.route, Screen.Player.route, Screen.More.route)
+    val mainTabRoutes = setOf(Screen.Home.route, Screen.Search.route, Screen.Player.route, Screen.More.route)
 
     // Leave any detail screen (artist/album/more/...) then land on a bottom tab.
     fun navigateToTab(targetRoute: String) {
@@ -161,7 +175,7 @@ private fun AppContent() {
         val current = navController.currentDestination?.route
         if (current == targetRoute) return
         navController.navigate(targetRoute) {
-            popUpTo(Screen.Search.route) {
+            popUpTo(Screen.Home.route) {
                 saveState = true
             }
             launchSingleTop = true
@@ -181,24 +195,67 @@ private fun AppContent() {
 
 
 
-    Column(
+    val online by NetworkMonitor.isOnline.collectAsState()
+    val offlineMode by OfflineModeRepository.enabled.collectAsState()
+    var offerDismissed by remember { mutableStateOf(false) }
+    LaunchedEffect(online) { if (online) offerDismissed = false }
+
+    CompositionLocalProvider(LocalPlayerState provides playerState) {
+    if (!online && !offlineMode && !offerDismissed) {
+        AlertDialog(
+            onDismissRequest = { offerDismissed = true },
+            title = { Text(strings.offlineDialogTitle) },
+            text = { Text(strings.offlineDialogText) },
+            confirmButton = {
+                TextButton(onClick = { OfflineModeRepository.set(true) }) {
+                    Text(strings.offlineDialogEnable)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { offerDismissed = true }) { Text(strings.offlineDialogStay) }
+            },
+        )
+    }
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
             .statusBarsPadding(),
     ) {
+        if (offlineMode) {
+            Surface(color = MaterialTheme.colorScheme.tertiaryContainer, modifier = Modifier.fillMaxWidth()) {
+                Row(
+                    modifier = Modifier.padding(start = 16.dp, end = 8.dp, top = 2.dp, bottom = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = if (online) strings.offlineBannerOnline else strings.offlineBannerOn,
+                        style = MaterialTheme.typography.labelLarge,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (online) {
+                        TextButton(onClick = { OfflineModeRepository.set(false) }) {
+                            Text(strings.offlineGoOnline)
+                        }
+                    }
+                }
+            }
+        }
         NavHost(
             navController = navController,
-            startDestination = Screen.Search.route,
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
+            startDestination = Screen.Home.route,
+            modifier = Modifier.fillMaxSize(),
             // Instant tab switches — default crossfade left Player painted over More
             enterTransition = { EnterTransition.None },
             exitTransition = { ExitTransition.None },
             popEnterTransition = { EnterTransition.None },
             popExitTransition = { ExitTransition.None },
         ) {
+            composable(Screen.Home.route) {
+                HomeScreen(
+                    onTrackClick = { track, queue -> onTrackClick(track, queue) },
+                )
+            }
             composable(Screen.Search.route) {
                 SearchScreen(
                     onArtistClick = { artist ->
@@ -287,9 +344,13 @@ private fun AppContent() {
 
 
             }
+            composable("queue") {
+                QueueScreen(player = playerState, onBack = { navController.popBackStack() })
+            }
             composable(Screen.Player.route) {
                 PlayerScreen(
                     player = playerState,
+                    onOpenQueue = { navController.navigate("queue") },
                     onArtistClick = { artistId ->
                         val encodedId = URLEncoder.encode(artistId, "UTF-8")
                         navController.navigate("artist/$encodedId")
@@ -372,23 +433,66 @@ private fun AppContent() {
         }
 
 
-        Column(
+        val playingTrack = playerState.currentTrack
+        val showMiniPlayer = playingTrack != null &&
+                currentRoute != Screen.Player.route &&
+                currentRoute != "queue"
+
+        // Floating dock is an overlay, not a sibling below the content.
+        // This lets the screen continue underneath the dock instead of creating
+        // an opaque/empty strip at the bottom of the app.
+        // Floating dock: the mini-player and bottom tabs share one glass capsule.
+        // When there is no mini-player, the same capsule simply contains the tabs.
+        Box(
             modifier = Modifier
+                .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .background(MaterialTheme.colorScheme.surface)
-                .navigationBarsPadding(),
+                .navigationBarsPadding()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            contentAlignment = Alignment.Center,
         ) {
-            val playingTrack = playerState.currentTrack
-            if (playingTrack != null && currentRoute != Screen.Player.route) {
-                MiniPlayerBar(
-                    track = playingTrack,
-                    isPlaying = playerState.isPlaying,
-                    onOpenPlayer = { openPlayerTab() },
-                    onTogglePlay = { playerState.togglePlayPause() },
-                )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(28.dp))
+                    // Fully opaque neutral dock. Nothing from the screen underneath
+                    // is allowed to bleed through the capsule.
+                    .background(
+                        brush = Brush.verticalGradient(
+                            colors = listOf(
+                                Color(0xFF242424),
+                                Color(0xFF171717),
+                            ),
+                        ),
+                    )
+                    .border(
+                        width = 1.dp,
+                        color = Color(0xFF4A4A4A),
+                        shape = RoundedCornerShape(28.dp),
+                    ),
+            ) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    if (showMiniPlayer) {
+                        MiniPlayerBar(
+                            track = playingTrack!!,
+                            isPlaying = playerState.isPlaying,
+                            onOpenPlayer = { openPlayerTab() },
+                            onTogglePlay = { playerState.togglePlayPause() },
+                        )
+                        HorizontalDivider(
+                            modifier = Modifier.padding(horizontal = 12.dp),
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
+                            thickness = 1.dp,
+                        )
+                    }
+                    BottomBar(
+                        currentRoute = currentRoute,
+                        onTabSelected = { navigateToTab(it) },
+                    )
+                }
             }
-            BottomBar(currentRoute = currentRoute, onTabSelected = { navigateToTab(it) })
         }
+    }
     }
 }
 
@@ -403,7 +507,8 @@ private fun MiniPlayerBar(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onOpenPlayer),
-        color = MaterialTheme.colorScheme.surfaceVariant,
+        color = Color.Transparent,
+        tonalElevation = 0.dp,
     ) {
         Row(
             modifier = Modifier
@@ -452,18 +557,21 @@ private fun BottomBar(
 ) {
     val strings = LocalStrings.current
     fun labelFor(screen: Screen): String = when (screen) {
+        Screen.Home -> strings.tabHome
         Screen.Search -> strings.tabSearch
         Screen.Player -> strings.tabPlayer
         Screen.More -> strings.tabMore
     }
     NavigationBar(
-        containerColor = MaterialTheme.colorScheme.surface,
+        modifier = Modifier.fillMaxWidth(),
+        containerColor = Color.Transparent,
         contentColor = MaterialTheme.colorScheme.onSurface,
         tonalElevation = 0.dp,
     ) {
         bottomTabs.forEach { screen ->
             NavigationBarItem(
                 selected = currentRoute == screen.route ||
+                        (screen.route == Screen.Player.route && currentRoute == "queue") ||
                         (screen.route == Screen.More.route && currentRoute?.startsWith("more/") == true),
                 onClick = { onTabSelected(screen.route) },
                 icon = {

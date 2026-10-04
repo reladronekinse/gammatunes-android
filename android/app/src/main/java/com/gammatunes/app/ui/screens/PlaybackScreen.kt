@@ -46,7 +46,7 @@ fun PlaybackScreen(onBack: () -> Unit) {
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp)
-                .padding(bottom = 120.dp),
+                .padding(bottom = 300.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             LiquidGlassSurface(

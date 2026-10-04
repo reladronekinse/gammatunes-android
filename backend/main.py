@@ -131,12 +131,91 @@ def _to_album(item: dict[str, Any]) -> Album | None:
         year=item.get("year"),
     )
 
+# --- SoundCloud (second source) --------------------------------------------
+# Tracks use the id "sc_<numeric id>"; search and streams go through yt-dlp.
+
+_SC_PREFIX = "sc_"
+_SC_ARTWORK_RE = re.compile(
+    r"-(?:mini|tiny|small|badge|t67x67|large|t300x300|crop|t500x500|original)\.\w+$"
+)
+_SC_AUDIO_FORMAT = "bestaudio[protocol^=http]"
+_SC_STREAM_TTL_SECONDS = 20 * 60
+
+def _is_sc_id(video_id: str | None) -> bool:
+    return bool(video_id) and video_id.startswith(_SC_PREFIX)
+
+def _sc_track_url(video_id: str) -> str:
+    track_id = video_id[len(_SC_PREFIX):]
+    if not track_id.isdigit():
+        raise ValueError(f"Invalid SoundCloud track id: {video_id}")
+    return f"https://api.soundcloud.com/tracks/{track_id}"
+
+def _sc_fast_thumbnails(info: dict[str, Any]) -> list[dict[str, Any]] | None:
+    # The stock extractor sends one HEAD request per result; derive the URL instead.
+    url = info.get("artwork_url") or (info.get("user") or {}).get("avatar_url")
+    if not url:
+        return None
+    if _SC_ARTWORK_RE.search(url):
+        url = _SC_ARTWORK_RE.sub("-t500x500.jpg", url)
+    return [{"id": "t500x500", "url": url}]
+
+def _sc_to_track(entry: dict[str, Any]) -> Track | None:
+    track_id = entry.get("id")
+    if not track_id:
+        return None
+    thumb = None
+    thumbs = entry.get("thumbnails") or []
+    for t in thumbs:
+        if t.get("id") == "t500x500" and t.get("url"):
+            thumb = t["url"]
+            break
+    if thumb is None and thumbs:
+        thumb = thumbs[-1].get("url")
+    duration = entry.get("duration")
+    return Track(
+        videoId=f"{_SC_PREFIX}{track_id}",
+        title=entry.get("title") or "Unknown",
+        artist=entry.get("uploader") or entry.get("channel") or "Unknown",
+        thumbnail=thumb or entry.get("thumbnail"),
+        durationSeconds=int(duration) if duration else None,
+    )
+
+def _search_soundcloud(query: str, limit: int) -> list[Track]:
+    limit = max(1, min(50, limit))
+    opts = {"quiet": True, "no_warnings": True, "extract_flat": True, "skip_download": True}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        try:
+            ie = ydl.get_info_extractor("SoundcloudSearch")
+            ie._extract_thumbnails = _sc_fast_thumbnails
+        except Exception as exc:
+            print(f"[ytm-backend] soundcloud thumbnail patch skipped: {exc!r}")
+        info = ydl.extract_info(f"scsearch{limit}:{query}", download=False)
+    tracks: list[Track] = []
+    seen: set[str] = set()
+    for entry in (info or {}).get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        tr = _sc_to_track(entry)
+        if tr and tr.videoId not in seen:
+            seen.add(tr.videoId)
+            tracks.append(tr)
+    return tracks
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
 @app.get("/search", response_model=SearchResponse)
-def search(q: str = Query(..., min_length=1), limit: int = 25) -> SearchResponse:
+def search(
+    q: str = Query(..., min_length=1),
+    limit: int = 25,
+    source: str = Query(default="ytm"),
+) -> SearchResponse:
+    if source.lower() == "soundcloud":
+        try:
+            return SearchResponse(results=_search_soundcloud(q, limit))
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"SoundCloud search failed: {exc}") from exc
     try:
         raw = yt.search(q, filter="songs", limit=limit)
     except Exception as exc:
@@ -145,8 +224,60 @@ def search(q: str = Query(..., min_length=1), limit: int = 25) -> SearchResponse
     tracks = [t for t in (_to_track(item) for item in raw) if t is not None]
     return SearchResponse(results=tracks)
 
+@app.get("/recommendations", response_model=SearchResponse)
+def recommendations(
+    seed: list[str] = Query(default=[]),
+    artist: list[str] = Query(default=[]),
+    source: str = "all",
+    limit: int = Query(30, ge=1, le=60),
+) -> SearchResponse:
+    """Mixed picks: YTM radio per seed track + SoundCloud search per artist."""
+    src = source.lower()
+    batches: list[list[Track]] = []
+    if src != "ytm":
+        for name in artist[:2]:
+            try:
+                batches.append(_search_soundcloud(name, min(limit, 15)))
+            except Exception:
+                continue
+    if src != "soundcloud":
+        for vid in [v for v in seed if not _is_sc_id(v)][:3]:
+            try:
+                wp = yt.get_watch_playlist(videoId=vid, radio=True, limit=limit)
+            except Exception:
+                continue
+            items = []
+            for t in wp.get("tracks") or []:
+                t = dict(t)
+                t.setdefault("thumbnails", t.get("thumbnail"))
+                items.append(_to_track(t))
+            batches.append([t for t in items if t])
+        if not batches:
+            for name in (artist[:2] or ["top hits"]):
+                try:
+                    raw = yt.search(name, filter="songs", limit=limit)
+                    batches.append([t for t in map(_to_track, raw) if t])
+                except Exception as exc:
+                    raise HTTPException(502, f"Recommendations failed: {exc}")
+
+    seen = set(seed)
+    out: list[Track] = []
+    for i in range(max((len(b) for b in batches), default=0)):
+        for b in batches:
+            if i < len(b) and b[i].videoId not in seen:
+                seen.add(b[i].videoId)
+                out.append(b[i])
+    return SearchResponse(results=out[:limit])
+
+
 @app.get("/search/artists", response_model=ArtistSearchResponse)
-def search_artists(q: str = Query(..., min_length=1), limit: int = 20) -> ArtistSearchResponse:
+def search_artists(
+    q: str = Query(..., min_length=1),
+    limit: int = 20,
+    source: str = Query(default="ytm"),
+) -> ArtistSearchResponse:
+    if source.lower() == "soundcloud":
+        return ArtistSearchResponse(artists=[])
 
     try:
         raw = yt.search(q, filter="artists", limit=limit)
@@ -242,7 +373,38 @@ def _stream_expiry(stream_url: str) -> float:
 
     return time.time() + 3600
 
+def _extract_sc_stream(video_id: str) -> StreamResponse:
+    cache_key = f"{video_id}:soundcloud"
+    cached = _stream_cache.get(cache_key)
+    if cached is not None and time.time() < cached[0]:
+        return cached[1]
+    ydl_opts = {"format": _SC_AUDIO_FORMAT, "quiet": True, "no_warnings": True, "noplaylist": True}
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(_sc_track_url(video_id), download=False)
+    fmt = info
+    if "url" not in fmt:
+        candidates = [
+            f for f in (info.get("formats") or [])
+            if f.get("url") and str(f.get("protocol") or "").startswith("http")
+            and f.get("acodec") != "none"
+        ]
+        if not candidates:
+            raise HTTPException(status_code=404, detail="No progressive SoundCloud stream available")
+        fmt = max(candidates, key=lambda f: f.get("abr") or f.get("tbr") or 0)
+    result = StreamResponse(
+        videoId=video_id,
+        streamUrl=fmt["url"],
+        mimeType=fmt.get("ext") or "mp3",
+        bitrate=int(fmt.get("abr") or fmt.get("tbr") or 0),
+        quality="high",
+        httpHeaders=dict(fmt.get("http_headers") or info.get("http_headers") or {}),
+    )
+    _stream_cache[cache_key] = (time.time() + _SC_STREAM_TTL_SECONDS, result)
+    return result
+
 def _extract_stream(video_id: str, quality: str | None = None) -> StreamResponse:
+    if _is_sc_id(video_id):
+        return _extract_sc_stream(video_id)
     quality = _normalize_quality(quality)
     cache_key = f"{video_id}:{quality}"
     cached = _stream_cache.get(cache_key)

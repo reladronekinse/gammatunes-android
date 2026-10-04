@@ -22,7 +22,7 @@ import coil.compose.AsyncImage
 import com.gammatunes.app.model.Track
 import com.gammatunes.app.network.ApiClient
 import com.gammatunes.app.offline.OfflineRepository
-import com.gammatunes.app.ui.components.DownloadButton
+import com.gammatunes.app.ui.components.TrackContextMenu
 import com.gammatunes.app.ui.i18n.LocalStrings
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -85,7 +85,7 @@ fun ArtistSongsScreen(
                 Text(strings.nothingFound, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             else -> LazyColumn(
-                contentPadding = PaddingValues(start = 16.dp, top = 8.dp, end = 16.dp, bottom = 120.dp),
+                contentPadding = PaddingValues(start = 16.dp, top = 8.dp, end = 16.dp, bottom = 300.dp),
             ) {
                 itemsIndexed(tracks, key = { i, t -> "$i:${t.videoId}" }) { index, track ->
                     ArtistSongRow(
@@ -101,63 +101,56 @@ fun ArtistSongsScreen(
 
 @Composable
 private fun ArtistSongRow(number: Int, track: Track, onClick: () -> Unit) {
-    var showDownload by remember { mutableStateOf(false) }
-    val indexMap by OfflineRepository.index.collectAsState()
-    val downloadingIds by OfflineRepository.downloadingIds.collectAsState()
-    val isDownloaded = indexMap.containsKey(track.videoId)
-    val isDownloading = downloadingIds.contains(track.videoId)
+    var showMenu by remember { mutableStateOf(false) }
 
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .combinedClickable(
-                onClick = onClick,
-                onLongClick = { showDownload = true },
-            )
-            .padding(vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = number.toString(),
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.width(32.dp),
-        )
-        AsyncImage(
-            model = track.thumbnail,
-            contentDescription = track.title,
+    Box {
+        Row(
             modifier = Modifier
-                .size(48.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(MaterialTheme.colorScheme.surfaceVariant),
-        )
-        Spacer(Modifier.width(12.dp))
-        Column(modifier = Modifier.weight(1f)) {
+                .fillMaxWidth()
+                .combinedClickable(
+                    onClick = onClick,
+                    onLongClick = { showMenu = true },
+                )
+                .padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Text(
-                track.title,
-                style = MaterialTheme.typography.bodyLarge,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+                text = number.toString(),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.width(32.dp),
             )
-            if (!track.album.isNullOrBlank()) {
+            AsyncImage(
+                model = track.thumbnail,
+                contentDescription = track.title,
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    track.album!!,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    track.title,
+                    style = MaterialTheme.typography.bodyLarge,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+                if (!track.album.isNullOrBlank()) {
+                    Text(
+                        track.album!!,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
-        if (showDownload || isDownloading || isDownloaded) {
-            DownloadButton(track = track)
-        }
-    }
-    if (showDownload && !isDownloaded && !isDownloading) {
-        LaunchedEffect(track.videoId) {
-            OfflineRepository.download(track)
-            kotlinx.coroutines.delay(2500)
-            showDownload = false
-        }
+        TrackContextMenu(
+            track = track,
+            expanded = showMenu,
+            onDismiss = { showMenu = false },
+        )
     }
 }

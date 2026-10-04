@@ -1,14 +1,16 @@
 package com.gammatunes.app.ui.components
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -19,6 +21,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -31,8 +37,9 @@ import com.gammatunes.app.player.ArtistStat
 
 /**
  * A square track tile for grid sections (Cached, Top 15, search results grids, etc).
- * Optionally shows a small rank badge (e.g. "#1") and a download/cache action overlay.
+ * Long-press opens a context menu (Play next / Download-Delete).
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun TrackGridCell(
     track: Track,
@@ -40,85 +47,81 @@ fun TrackGridCell(
     modifier: Modifier = Modifier,
     subtitle: String? = null,
     rank: Int? = null,
-    showDownloadAction: Boolean = true,
+    @Suppress("UNUSED_PARAMETER") showDownloadAction: Boolean = false,
+    @Suppress("UNUSED_PARAMETER") showPlayNextAction: Boolean = false,
 ) {
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
-    ) {
-        Box {
-            if (!track.thumbnail.isNullOrBlank()) {
-                AsyncImage(
-                    model = track.thumbnail,
-                    contentDescription = track.title,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(1f)
-                        .clip(RoundedCornerShape(12.dp)),
-                    contentScale = ContentScale.Crop,
-                )
-            } else {
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(1f),
-                    shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(Icons.Default.MusicNote, contentDescription = null)
+    var showMenu by remember { mutableStateOf(false) }
+
+    Box {
+        Column(
+            modifier = modifier
+                .fillMaxWidth()
+                .combinedClickable(
+                    onClick = onClick,
+                    onLongClick = { showMenu = true },
+                ),
+        ) {
+            Box {
+                if (!track.thumbnail.isNullOrBlank()) {
+                    AsyncImage(
+                        model = track.thumbnail,
+                        contentDescription = track.title,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(1f)
+                            .clip(RoundedCornerShape(12.dp)),
+                        contentScale = ContentScale.Crop,
+                    )
+                } else {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(1f),
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(Icons.Default.MusicNote, contentDescription = null)
+                        }
+                    }
+                }
+
+                if (rank != null) {
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .padding(6.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
+                    ) {
+                        Text(
+                            text = "#$rank",
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
                     }
                 }
             }
-
-            if (rank != null) {
-                Surface(
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(6.dp),
-                    shape = RoundedCornerShape(8.dp),
-                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
-                ) {
-                    Text(
-                        text = "#$rank",
-                        style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-                }
-            }
-
-            if (showDownloadAction) {
-                Surface(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(6.dp),
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
-                ) {
-                    DownloadButton(
-                        track = track,
-                        modifier = Modifier.padding(2.dp),
-                        buttonSize = 24.dp,
-                        iconSize = 16.dp,
-                    )
-                }
-            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = track.title,
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = subtitle ?: track.artist,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
-        Spacer(modifier = Modifier.height(6.dp))
-        Text(
-            text = track.title,
-            style = MaterialTheme.typography.bodyMedium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Text(
-            text = subtitle ?: track.artist,
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
+        TrackContextMenu(
+            track = track,
+            expanded = showMenu,
+            onDismiss = { showMenu = false },
         )
     }
 }

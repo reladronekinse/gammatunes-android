@@ -14,17 +14,24 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.gammatunes.app.auth.AuthRepository
+import com.gammatunes.app.auth.accountFor
+import com.gammatunes.app.model.MusicSource
 import com.gammatunes.app.model.Track
-import com.gammatunes.app.network.ApiClient
 import com.gammatunes.app.ui.components.BrowserLoginDialog
 import com.gammatunes.app.ui.components.LiquidGlassSurface
+import com.gammatunes.app.ui.components.SoundCloudLoginDialog
+import com.gammatunes.app.ui.components.clearSoundCloudWebSession
 import com.gammatunes.app.ui.i18n.LocalStrings
 import kotlinx.coroutines.launch
 
+/**
+ * Account screen for both services: a source switch on top, then the same
+ * sign-in / playlists / liked-tracks layout bound to the selected account.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AccountScreen(
@@ -32,12 +39,16 @@ fun AccountScreen(
     onBack: () -> Unit,
 ) {
     val strings = LocalStrings.current
-    val isLoggedIn by AuthRepository.isLoggedIn.collectAsState()
-    val accountHint by AuthRepository.accountHint.collectAsState()
-    val likedTracks by AuthRepository.likedTracks.collectAsState()
-    val playlists by AuthRepository.playlists.collectAsState()
-    val statusMessage by AuthRepository.statusMessage.collectAsState()
-    val isBusy by AuthRepository.isBusy.collectAsState()
+    var source by rememberSaveable { mutableStateOf(MusicSource.YTM) }
+    val isSoundCloud = source == MusicSource.SOUNDCLOUD
+    val account = accountFor(source)
+
+    val isLoggedIn by account.isLoggedIn.collectAsState()
+    val accountHint by account.accountHint.collectAsState()
+    val likedTracks by account.likedTracks.collectAsState()
+    val playlists by account.playlists.collectAsState()
+    val statusMessage by account.statusMessage.collectAsState()
+    val isBusy by account.isBusy.collectAsState()
     val scope = rememberCoroutineScope()
 
     var headersText by remember { mutableStateOf("") }
@@ -48,10 +59,20 @@ fun AccountScreen(
     var expandedPlaylistTracks by remember { mutableStateOf<List<Track>>(emptyList()) }
     var playlistLoading by remember { mutableStateOf(false) }
 
-    LaunchedEffect(isLoggedIn) {
+    // Switching service: drop everything that belonged to the other account.
+    LaunchedEffect(source) {
+        headersText = ""
+        showLoginField = false
+        showBrowserLogin = false
+        expandedLiked = false
+        expandedPlaylistId = null
+        expandedPlaylistTracks = emptyList()
+    }
+
+    LaunchedEffect(isLoggedIn, source) {
         if (isLoggedIn) {
-            if (likedTracks.isEmpty()) AuthRepository.refreshLiked()
-            if (playlists.isEmpty()) AuthRepository.refreshPlaylists()
+            if (likedTracks.isEmpty()) account.refreshLiked()
+            if (playlists.isEmpty()) account.refreshPlaylists()
         }
     }
 
@@ -73,9 +94,28 @@ fun AccountScreen(
 
         LazyColumn(
             modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
-            contentPadding = PaddingValues(top = 8.dp, bottom = 120.dp),
+            contentPadding = PaddingValues(top = 8.dp, bottom = 300.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            item {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    MusicSource.entries.forEach { option ->
+                        FilterChip(
+                            selected = source == option,
+                            onClick = { source = option },
+                            label = {
+                                Text(
+                                    when (option) {
+                                        MusicSource.YTM -> strings.sourceYtm
+                                        MusicSource.SOUNDCLOUD -> strings.sourceSoundCloud
+                                    },
+                                )
+                            },
+                        )
+                    }
+                }
+            }
+
             item {
                 LiquidGlassSurface(
                     modifier = Modifier.fillMaxWidth(),
@@ -90,6 +130,15 @@ fun AccountScreen(
                             style = MaterialTheme.typography.titleMedium,
                             maxLines = 1,
                         )
+                        // SoundCloud knows the user name; for YouTube it is just a generic label.
+                        if (isLoggedIn && isSoundCloud && !accountHint.isNullOrBlank()) {
+                            Text(
+                                text = accountHint.orEmpty(),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                            )
+                        }
 
                         val err = statusMessage.orEmpty()
                         val looksLikeError = err.isNotBlank() && (
@@ -122,7 +171,10 @@ fun AccountScreen(
                                 enabled = !isBusy,
                                 modifier = Modifier.fillMaxWidth(),
                             ) {
-                                Text(strings.loginWithHeaders)
+                                Text(
+                                    if (isSoundCloud) strings.soundCloudLoginWithToken
+                                    else strings.loginWithHeaders,
+                                )
                             }
                             if (showLoginField) {
                                 OutlinedTextField(
@@ -131,14 +183,19 @@ fun AccountScreen(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .heightIn(min = 120.dp),
-                                    placeholder = { Text(strings.needHeaders) },
+                                    placeholder = {
+                                        Text(
+                                            if (isSoundCloud) strings.soundCloudTokenPlaceholder
+                                            else strings.needHeaders,
+                                        )
+                                    },
                                     maxLines = 8,
                                 )
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     Button(
                                         onClick = {
                                             scope.launch {
-                                                val ok = AuthRepository.loginWithHeaders(headersText)
+                                                val ok = account.login(headersText)
                                                 if (ok) {
                                                     showLoginField = false
                                                     headersText = ""
@@ -164,7 +221,13 @@ fun AccountScreen(
                         } else {
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 OutlinedButton(
-                                    onClick = { scope.launch { AuthRepository.logout() } },
+                                    onClick = {
+                                        scope.launch {
+                                            account.logout()
+                                            // Otherwise the in-app browser would sign straight back in.
+                                            if (isSoundCloud) clearSoundCloudWebSession()
+                                        }
+                                    },
                                     enabled = !isBusy,
                                 ) {
                                     Icon(Icons.Default.Logout, contentDescription = null)
@@ -172,11 +235,7 @@ fun AccountScreen(
                                     Text(strings.logout)
                                 }
                                 OutlinedButton(
-                                    onClick = {
-                                        scope.launch {
-                                            AuthRepository.refreshPlaylists()
-                                        }
-                                    },
+                                    onClick = { scope.launch { account.refreshPlaylists() } },
                                     enabled = !isBusy,
                                 ) {
                                     Icon(Icons.Default.Refresh, contentDescription = null)
@@ -202,7 +261,7 @@ fun AccountScreen(
                             modifier = Modifier.weight(1f),
                         )
                         IconButton(
-                            onClick = { scope.launch { AuthRepository.refreshPlaylists() } },
+                            onClick = { scope.launch { account.refreshPlaylists() } },
                             enabled = !isBusy,
                         ) {
                             Icon(Icons.Default.Refresh, contentDescription = strings.refreshPlaylists)
@@ -212,7 +271,7 @@ fun AccountScreen(
                 if (playlists.isEmpty()) {
                     item {
                         Text(
-                            strings.playlistsEmpty,
+                            if (isSoundCloud) strings.soundCloudPlaylistsEmpty else strings.playlistsEmpty,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
@@ -236,14 +295,8 @@ fun AccountScreen(
                                                 playlistLoading = true
                                                 scope.launch {
                                                     try {
-                                                        val detail =
-                                                            ApiClient.api.playlistTracks(
-                                                                pl.playlistId,
-                                                                limit = 5000,
-                                                            )
-                                                        expandedPlaylistTracks = detail.tracks
-                                                    } catch (_: Throwable) {
-                                                        expandedPlaylistTracks = emptyList()
+                                                        expandedPlaylistTracks =
+                                                            account.loadPlaylistTracks(pl.playlistId)
                                                     } finally {
                                                         playlistLoading = false
                                                     }
@@ -320,7 +373,7 @@ fun AccountScreen(
                                     modifier = Modifier.weight(1f),
                                 )
                                 IconButton(
-                                    onClick = { scope.launch { AuthRepository.refreshLiked() } },
+                                    onClick = { scope.launch { account.refreshLiked() } },
                                     enabled = !isBusy,
                                 ) {
                                     Icon(Icons.Default.Refresh, contentDescription = strings.refreshLikes)
@@ -356,16 +409,24 @@ fun AccountScreen(
     }
 
     if (showBrowserLogin) {
-        BrowserLoginDialog(
-            onDismiss = { showBrowserLogin = false },
-            onCookiesCaptured = { headers ->
-                scope.launch {
-                    val ok = AuthRepository.loginWithHeaders(headers)
-                    if (ok) {
-                        showBrowserLogin = false
+        if (isSoundCloud) {
+            SoundCloudLoginDialog(
+                onDismiss = { showBrowserLogin = false },
+                onTokenCaptured = { token ->
+                    scope.launch {
+                        if (account.login(token)) showBrowserLogin = false
                     }
-                }
-            },
-        )
+                },
+            )
+        } else {
+            BrowserLoginDialog(
+                onDismiss = { showBrowserLogin = false },
+                onCookiesCaptured = { headers ->
+                    scope.launch {
+                        if (account.login(headers)) showBrowserLogin = false
+                    }
+                },
+            )
+        }
     }
 }

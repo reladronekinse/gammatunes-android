@@ -1,6 +1,7 @@
 package com.gammatunes.app.ui.screens
 
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -13,7 +14,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -23,10 +27,11 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.gammatunes.app.model.Track
 import com.gammatunes.app.offline.OfflineRepository
+import com.gammatunes.app.ui.components.TrackContextMenu
 import com.gammatunes.app.ui.i18n.LocalStrings
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun OfflineAlbumDetailScreen(
     albumId: String,
@@ -84,7 +89,7 @@ fun OfflineAlbumDetailScreen(
             }
         } else {
             LazyColumn(
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 120.dp),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 300.dp),
             ) {
                 item {
                     Spacer(Modifier.height(8.dp))
@@ -128,25 +133,36 @@ fun OfflineAlbumDetailScreen(
                     Spacer(Modifier.height(16.dp))
                 }
                 itemsIndexed(tracks, key = { _, t -> t.videoId }) { index, track ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onTrackClick(track, tracks) }
-                            .padding(horizontal = 4.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            text = (index + 1).toString(),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.width(28.dp),
-                        )
-                        Text(
-                            text = track.title,
-                            style = MaterialTheme.typography.bodyLarge,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f),
+                    var showMenu by remember { mutableStateOf(false) }
+                    Box {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .combinedClickable(
+                                    onClick = { onTrackClick(track, tracks) },
+                                    onLongClick = { showMenu = true },
+                                )
+                                .padding(horizontal = 4.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = (index + 1).toString(),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.width(28.dp),
+                            )
+                            Text(
+                                text = track.title,
+                                style = MaterialTheme.typography.bodyLarge,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                        TrackContextMenu(
+                            track = track,
+                            expanded = showMenu,
+                            onDismiss = { showMenu = false },
                         )
                     }
                 }

@@ -6,16 +6,26 @@ import com.gammatunes.app.model.PlaylistSummary
 import com.gammatunes.app.model.Track
 import com.gammatunes.app.network.ApiClient
 import com.gammatunes.app.network.addToPlaylist
+import com.gammatunes.app.network.backendMessage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
-import java.io.File
 import retrofit2.HttpException
+import java.io.File
 
-object AuthRepository : MusicAccount {
-    private const val TAG = "AuthRepository"
-    private const val AUTH_FILE = "ytm_browser_auth.json"
+/**
+ * SoundCloud session: sign-in, liked tracks, playlists, likes. Mirrors
+ * [AuthRepository]; the embedded backend does the actual SoundCloud calls
+ * (all requests here carry `source=soundcloud`).
+ *
+ * The persisted file holds just `{"oauthToken": "..."}`; it is replayed to the
+ * backend on every app start because the backend keeps the session in memory.
+ */
+object SoundCloudAuthRepository : MusicAccount {
+    private const val TAG = "SoundCloudAuth"
+    private const val AUTH_FILE = "sc_auth.json"
+    private const val SOURCE = "soundcloud"
 
     private lateinit var appContext: Context
 
@@ -48,18 +58,15 @@ object AuthRepository : MusicAccount {
 
     private fun authFile(): File = File(appContext.filesDir, AUTH_FILE)
 
-
-    override suspend fun login(raw: String): Boolean = loginWithHeaders(raw)
-
-    suspend fun loginWithHeaders(rawHeaders: String): Boolean = withContext(Dispatchers.IO) {
+    override suspend fun login(raw: String): Boolean = withContext(Dispatchers.IO) {
         _isBusy.value = true
         _statusMessage.value = null
         try {
-            val response = ApiClient.api.authLogin(mapOf("headersRaw" to rawHeaders.trim()))
+            val response = ApiClient.api.authLogin(
+                mapOf("headersRaw" to raw.trim(), "source" to SOURCE),
+            )
             if (response.ok) {
-
-
-                authFile().writeText(response.authJson ?: rawHeaders)
+                authFile().writeText(response.authJson ?: raw.trim())
                 _isLoggedIn.value = true
                 _accountHint.value = response.accountName ?: "Вход выполнен"
                 _statusMessage.value = "Вход выполнен"
@@ -70,80 +77,17 @@ object AuthRepository : MusicAccount {
             }
         } catch (t: Throwable) {
             Log.e(TAG, "login failed", t)
-            _statusMessage.value = extractErrorMessage(t)
+            _statusMessage.value = t.backendMessage()
             false
         } finally {
             _isBusy.value = false
         }
     }
 
-    private fun extractErrorMessage(t: Throwable): String {
-        if (t is HttpException) {
-            val body = try {
-                t.response()?.errorBody()?.string()
-            } catch (_: Throwable) {
-                null
-            }
-
-            if (!body.isNullOrBlank()) {
-                val key = "\"detail\""
-                val idx = body.indexOf(key)
-                if (idx >= 0) {
-                    val after = body.substring(idx + key.length)
-                    val colon = after.indexOf(':')
-                    val firstQuote = after.indexOf('"', startIndex = (colon + 1).coerceAtLeast(0))
-                    val secondQuote = if (firstQuote >= 0) after.indexOf('"', startIndex = firstQuote + 1) else -1
-                    if (firstQuote >= 0 && secondQuote > firstQuote) {
-                        return decodeJsonString(after.substring(firstQuote + 1, secondQuote)).take(280)
-                    }
-                }
-
-                val cleaned = decodeJsonString(
-                    body.replace("\n", " ").replace(Regex("\\\\n"), " "),
-                ).take(200)
-                return cleaned
-            }
-            return "HTTP ${t.code()}"
-        }
-        return t.message ?: "Ошибка входа"
-    }
-
-
-    private fun decodeJsonString(raw: String): String {
-        return buildString(raw.length) {
-            var i = 0
-            while (i < raw.length) {
-                val c = raw[i]
-                if (c == '\\' && i + 1 < raw.length) {
-                    when (raw[i + 1]) {
-                        'u' -> {
-                            if (i + 5 < raw.length) {
-                                val hex = raw.substring(i + 2, i + 6)
-                                val code = hex.toIntOrNull(16)
-                                if (code != null) {
-                                    append(code.toChar())
-                                    i += 6
-                                    continue
-                                }
-                            }
-                        }
-                        'n' -> { append('\n'); i += 2; continue }
-                        't' -> { append('\t'); i += 2; continue }
-                        '"' -> { append('"'); i += 2; continue }
-                        '\\' -> { append('\\'); i += 2; continue }
-                        '/' -> { append('/'); i += 2; continue }
-                    }
-                }
-                append(c)
-                i++
-            }
-        }
-    }
-
     override suspend fun logout() = withContext(Dispatchers.IO) {
         _isBusy.value = true
         try {
-            runCatching { ApiClient.api.authLogout() }
+            runCatching { ApiClient.api.authLogout(SOURCE) }
             authFile().delete()
             _isLoggedIn.value = false
             _accountHint.value = null
@@ -160,14 +104,14 @@ object AuthRepository : MusicAccount {
         _isBusy.value = true
         _statusMessage.value = null
         try {
-            val response = ApiClient.api.likedSongs(limit)
+            val response = ApiClient.api.likedSongs(limit, SOURCE)
             _likedTracks.value = response.results
             if (response.results.isEmpty()) {
                 _statusMessage.value = "Лайкнутых треков нет или сессия устарела"
             }
         } catch (t: Throwable) {
-            Log.e(TAG, "liked songs failed", t)
-            _statusMessage.value = extractErrorMessage(t)
+            Log.e(TAG, "liked tracks failed", t)
+            _statusMessage.value = t.backendMessage()
         } finally {
             _isBusy.value = false
         }
@@ -177,12 +121,11 @@ object AuthRepository : MusicAccount {
         if (!_isLoggedIn.value) return@withContext
         _isBusy.value = true
         try {
-            val response = ApiClient.api.libraryPlaylists(limit)
-            _playlists.value = response.playlists
+            _playlists.value = ApiClient.api.libraryPlaylists(limit, SOURCE).playlists
             _statusMessage.value = null
         } catch (t: Throwable) {
             Log.e(TAG, "playlists failed", t)
-            _statusMessage.value = extractErrorMessage(t)
+            _statusMessage.value = t.backendMessage()
         } finally {
             _isBusy.value = false
         }
@@ -194,15 +137,14 @@ object AuthRepository : MusicAccount {
                 ApiClient.api.playlistTracks(playlistId, limit).tracks
             } catch (t: Throwable) {
                 Log.e(TAG, "playlist tracks failed", t)
-                _statusMessage.value = extractErrorMessage(t)
+                _statusMessage.value = t.backendMessage()
                 emptyList()
             }
         }
 
     override suspend fun likeTrack(videoId: String): Boolean = withContext(Dispatchers.IO) {
         try {
-            val response = ApiClient.api.rateSongBody(mapOf("videoId" to videoId, "rating" to "LIKE"))
-            response.ok
+            ApiClient.api.rateSongBody(mapOf("videoId" to videoId, "rating" to "LIKE")).ok
         } catch (t: Throwable) {
             Log.e(TAG, "like failed", t)
             false
@@ -211,41 +153,50 @@ object AuthRepository : MusicAccount {
 
     override suspend fun unlikeTrack(videoId: String): Boolean = withContext(Dispatchers.IO) {
         try {
-            val response = ApiClient.api.rateSongBody(mapOf("videoId" to videoId, "rating" to "INDIFFERENT"))
-            response.ok
+            ApiClient.api.rateSongBody(mapOf("videoId" to videoId, "rating" to "INDIFFERENT")).ok
         } catch (t: Throwable) {
             Log.e(TAG, "unlike failed", t)
             false
         }
     }
 
-    override suspend fun addToPlaylist(playlistId: String, videoId: String): Boolean = withContext(Dispatchers.IO) {
-        try {
-            val resp = ApiClient.api.addToPlaylist(playlistId, videoId)
-            resp.ok
-        } catch (t: Throwable) {
-            Log.e(TAG, "addToPlaylist failed", t)
-            false
+    override suspend fun addToPlaylist(playlistId: String, videoId: String): Boolean =
+        withContext(Dispatchers.IO) {
+            try {
+                ApiClient.api.addToPlaylist(playlistId, videoId).ok
+            } catch (t: Throwable) {
+                Log.e(TAG, "addToPlaylist failed", t)
+                false
+            }
         }
-    }
 
-
+    /** Replays the saved token to the (freshly started) backend. */
     suspend fun restoreSessionIfNeeded() = withContext(Dispatchers.IO) {
         val file = authFile()
         if (!file.exists()) return@withContext
         try {
             val content = file.readText()
             if (content.isBlank()) return@withContext
-            val response = ApiClient.api.authLogin(mapOf("headersRaw" to content))
+            val response = ApiClient.api.authLogin(mapOf("headersRaw" to content, "source" to SOURCE))
             if (response.ok) {
                 _isLoggedIn.value = true
                 _accountHint.value = response.accountName ?: "Сессия восстановлена"
             } else {
-                _isLoggedIn.value = false
-                file.delete()
+                dropSession(file)
             }
         } catch (t: Throwable) {
             Log.w(TAG, "restore session failed: ${t.message}")
+            // 400/401 = token no longer valid; anything else (offline...) keeps the session.
+            if (t is HttpException && (t.code() == 400 || t.code() == 401)) dropSession(file)
+            return@withContext
         }
+        // Restored: load likes so the heart in the player is right without opening Account.
+        refreshLiked()
+    }
+
+    private fun dropSession(file: File) {
+        _isLoggedIn.value = false
+        _accountHint.value = null
+        file.delete()
     }
 }

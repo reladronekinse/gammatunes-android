@@ -33,18 +33,6 @@ cd android
 The resulting APK will be at
 `android/app/build/outputs/apk/debug/app-debug.apk`.
 
-### Standalone backend (optional)
-
-```bash
-cd backend
-pip install -r requirements.txt
-uvicorn main:app --host 0.0.0.0 --port 8000
-```
-
-To point the app at an external backend instead of the on-device one, change
-`LocalBackend.BASE_URL` in
-`android/app/src/main/java/com/gammatunes/app/backend/LocalBackend.kt`.
-
 ## Features (0.4-stable)
 
 - Embedded Python backend (ytmusicapi + yt-dlp) via Chaquopy

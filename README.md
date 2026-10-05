@@ -13,7 +13,6 @@ rather run it on a PC or server instead of on-device.
 
 ```
 android/    Android client (Kotlin, Jetpack Compose)
-backend/    Standalone FastAPI backend (optional, PC/server use)
 ```
 
 ## Building

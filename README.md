@@ -33,48 +33,6 @@ cd android
 The resulting APK will be at
 `android/app/build/outputs/apk/debug/app-debug.apk`.
 
-### Standalone backend (optional)
-
-```bash
-cd backend
-pip install -r requirements.txt
-uvicorn main:app --host 0.0.0.0 --port 8000
-```
-
-To point the app at an external backend instead of the on-device one, change
-`LocalBackend.BASE_URL` in
-`android/app/src/main/java/com/gammatunes/app/backend/LocalBackend.kt`.
-
-## Features (0.5-unstable)
-
-- Embedded Python backend (ytmusicapi + yt-dlp) via Chaquopy
-- Material 3 UI with Liquid Glass surfaces
-- Home tab with personalised recommendations mixing YouTube Music radio (from your
-  top/recent tracks) and SoundCloud picks (by favourite artists), recently played and top tracks
-- Search as you type (debounced) with persistent search history (online and
-  downloaded-tracks searches keep separate histories)
-- Search (artists + tracks), artist/album detail
-- Source switcher in search: YouTube Music or SoundCloud (tracks and artists;
-  progressive and HLS streams are supported for playback and offline downloads)
-- Playback via ExoPlayer + MediaSession foreground service (notification controls)
-- Queue screen (open from the player): jump to a track, drag to reorder, remove;
-  "Play next" button on track rows and tiles
-- Queue next/previous, repeat modes, seek
-- Offline downloads (tracks and full albums), searchable cached-tracks list
-- Offline mode: offered automatically when the connection drops; search, home and
-  next/previous then use downloaded tracks only
-- Browser-header login for YouTube Music likes and library playlists
-- SoundCloud account: in-app browser sign-in (or paste an `oauth_token`),
-  likes, your/liked playlists, add-to-playlist, artist pages (popular tracks,
-  albums, playlists)
-- Account screen with a YouTube Music / SoundCloud switch (liked songs, playlists)
-- Listen together: show a QR, a friend scans it, and playback (track, queue, play/pause,
-  seek) is synced between two phones over the local Wi-Fi — each phone streams the music itself
-- Appearance settings (cover style, seek bar, accents, app icon colors)
-- Equalizer with sound profiles (Flat, Bass, Treble, Vocal, Rock, Pop, Jazz, Classical,
-  Electronic, Hip-Hop, Acoustic) and a custom per-band mode
-- EN / RU localization
-
 ### SoundCloud account notes
 
 SoundCloud's official API requires a registered developer app, so the app uses

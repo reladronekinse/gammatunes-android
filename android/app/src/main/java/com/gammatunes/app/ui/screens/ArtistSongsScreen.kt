@@ -2,6 +2,7 @@
 
 package com.gammatunes.app.ui.screens
 
+import com.gammatunes.app.ui.components.dockPadding
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
@@ -85,7 +86,7 @@ fun ArtistSongsScreen(
                 Text(strings.nothingFound, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             else -> LazyColumn(
-                contentPadding = PaddingValues(start = 16.dp, top = 8.dp, end = 16.dp, bottom = 300.dp),
+                contentPadding = PaddingValues(start = 16.dp, top = 8.dp, end = 16.dp, bottom = dockPadding()),
             ) {
                 itemsIndexed(tracks, key = { i, t -> "$i:${t.videoId}" }) { index, track ->
                     ArtistSongRow(

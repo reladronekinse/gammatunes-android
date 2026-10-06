@@ -1,6 +1,31 @@
 package com.gammatunes.app
 
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.FastOutLinearInEasing
+import com.gammatunes.app.ui.components.LocalDockInset
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.runtime.mutableIntStateOf
 import android.Manifest
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.IntOffset
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -9,6 +34,7 @@ import androidx.core.content.ContextCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.tween
@@ -38,8 +64,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.navigation.NamedNavArgument
+import androidx.navigation.NavBackStackEntry
+import androidx.navigation.NavGraphBuilder
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -58,9 +88,16 @@ import com.gammatunes.app.ui.screens.ArtistAlbumsGridScreen
 import com.gammatunes.app.ui.screens.ArtistSongsScreen
 import com.gammatunes.app.offline.OfflineRepository
 import com.gammatunes.app.ui.screens.MoreScreen
+import com.gammatunes.app.ui.screens.MusicSectionScreen
+import com.gammatunes.app.ui.screens.SettingsSectionScreen
+import com.gammatunes.app.ui.screens.CacheScreen
 import com.gammatunes.app.ui.screens.AccountScreen
 import com.gammatunes.app.ui.screens.AppearanceScreen
 import com.gammatunes.app.ui.screens.PlaybackScreen
+import com.gammatunes.app.ui.screens.EqualizerScreen
+import com.gammatunes.app.ui.screens.TogetherScreen
+import com.gammatunes.app.together.TogetherSession
+import androidx.compose.runtime.DisposableEffect
 import com.gammatunes.app.ui.screens.UpdateScreen
 import com.gammatunes.app.ui.screens.OfflineTracksScreen
 import com.gammatunes.app.ui.screens.OfflineAlbumDetailScreen
@@ -86,6 +123,8 @@ import com.gammatunes.app.ui.i18n.LocalLanguage
 import com.gammatunes.app.ui.i18n.LocalStrings
 import com.gammatunes.app.ui.i18n.LocaleRepository
 import com.gammatunes.app.ui.i18n.stringsFor
+import com.gammatunes.app.ui.onboarding.OnboardingRepository
+import com.gammatunes.app.ui.onboarding.OnboardingFlow
 import com.gammatunes.app.ui.theme.GammaTunesTheme
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -93,7 +132,8 @@ import java.net.URLEncoder
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        requestNotificationPermissionIfNeeded()
+        // Новым пользователям разрешения запрашивает экран онбординга; здесь — только для тех, кто его уже прошёл
+        if (OnboardingRepository.completed.value) requestNotificationPermissionIfNeeded()
         enableEdgeToEdge()
         setContent {
             GammaTunesTheme {
@@ -128,15 +168,61 @@ private sealed class Screen(val route: String, val icon: ImageVector) {
 
 private val bottomTabs = listOf(Screen.Home, Screen.Search, Screen.Player, Screen.More)
 
+// ---- Screen transitions -------------------------------------------------------------
+private const val FADE_OUT_MS = 90
+private const val FADE_IN_MS = 210
+private const val SLIDE_MS = 320
+// Fraction of the screen width the content travels while sliding (subtle, not a full page swipe).
+private const val SLIDE_FRACTION = 8
+
+private fun isTabSwitch(from: String?, to: String?, tabs: Set<String>): Boolean =
+    from != null && to != null && from in tabs && to in tabs
+
+private fun fadeThroughIn(): EnterTransition =
+    fadeIn(tween(FADE_IN_MS, delayMillis = FADE_OUT_MS, easing = LinearOutSlowInEasing)) +
+        scaleIn(
+            initialScale = 0.96f,
+            animationSpec = tween(FADE_IN_MS, delayMillis = FADE_OUT_MS, easing = LinearOutSlowInEasing),
+        )
+
+private fun fadeThroughOut(): ExitTransition =
+    fadeOut(tween(FADE_OUT_MS, easing = FastOutLinearInEasing))
+
+private fun pushEnter(): EnterTransition =
+    slideInHorizontally(tween(SLIDE_MS, easing = FastOutSlowInEasing)) { it / SLIDE_FRACTION } +
+        fadeIn(tween(FADE_IN_MS, delayMillis = FADE_OUT_MS, easing = LinearOutSlowInEasing))
+
+private fun pushExit(): ExitTransition =
+    slideOutHorizontally(tween(SLIDE_MS, easing = FastOutSlowInEasing)) { -it / SLIDE_FRACTION } +
+        fadeOut(tween(FADE_OUT_MS, easing = FastOutLinearInEasing))
+
+private fun popEnter(): EnterTransition =
+    slideInHorizontally(tween(SLIDE_MS, easing = FastOutSlowInEasing)) { -it / SLIDE_FRACTION } +
+        fadeIn(tween(FADE_IN_MS, delayMillis = FADE_OUT_MS, easing = LinearOutSlowInEasing))
+
+private fun popExit(): ExitTransition =
+    slideOutHorizontally(tween(SLIDE_MS, easing = FastOutSlowInEasing)) { it / SLIDE_FRACTION } +
+        fadeOut(tween(FADE_OUT_MS, easing = FastOutLinearInEasing))
+
 @Composable
 fun App() {
     val lang by LocaleRepository.language.collectAsState()
     val strings = stringsFor(lang)
+    val onboardingDone by OnboardingRepository.completed.collectAsState()
+    val context = LocalContext.current
     CompositionLocalProvider(
         LocalLanguage provides lang,
         LocalStrings provides strings,
     ) {
-    AppContent()
+        // Первичная настройка показывается только при первом запуске. Основной UI (плеер,
+        // бэкенд-запросы и т.д.) не создаётся, пока пользователь не пройдёт или не пропустит её.
+        Crossfade(targetState = onboardingDone, label = "onboarding") { done ->
+            if (done) {
+                AppContent()
+            } else {
+                OnboardingFlow(onFinish = { OnboardingRepository.complete(context) })
+            }
+        }
     }
 }
 
@@ -157,6 +243,12 @@ private fun AppContent() {
         } else {
             DynamicAccent.updateFromThumbnail(context, thumb)
         }
+    }
+
+    // «Слушать вместе»: сессия живёт глобально и общается с плеером через хуки PlayerState
+    DisposableEffect(playerState) {
+        TogetherSession.attach(playerState)
+        onDispose { TogetherSession.detach(playerState) }
     }
 
     val mainTabRoutes = setOf(Screen.Home.route, Screen.Search.route, Screen.Player.route, Screen.More.route)
@@ -216,16 +308,18 @@ private fun AppContent() {
             },
         )
     }
+    // Height of the floating dock (capsule + system nav inset); screens use it as scroll reserve.
+    var dockHeightPx by remember { mutableIntStateOf(0) }
+    val dockInset = with(LocalDensity.current) { dockHeightPx.toDp() }
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .statusBarsPadding(),
+            .background(MaterialTheme.colorScheme.background),
     ) {
         if (offlineMode) {
             Surface(color = MaterialTheme.colorScheme.tertiaryContainer, modifier = Modifier.fillMaxWidth()) {
                 Row(
-                    modifier = Modifier.padding(start = 16.dp, end = 8.dp, top = 2.dp, bottom = 2.dp),
+                    modifier = Modifier.statusBarsPadding().padding(start = 16.dp, end = 8.dp, top = 2.dp, bottom = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
@@ -241,22 +335,50 @@ private fun AppContent() {
                 }
             }
         }
+        CompositionLocalProvider(LocalDockInset provides dockInset) {
         NavHost(
             navController = navController,
             startDestination = Screen.Home.route,
             modifier = Modifier.fillMaxSize(),
-            // Instant tab switches — default crossfade left Player painted over More
-            enterTransition = { EnterTransition.None },
-            exitTransition = { ExitTransition.None },
-            popEnterTransition = { EnterTransition.None },
-            popExitTransition = { ExitTransition.None },
+            // Tab <-> tab: "fade through" (old screen fades out first, the new one fades in
+            // after it), so two screens are never visible on top of each other — that was
+            // the old Player-over-More glitch with the default crossfade.
+            // Anything else (artist, album, queue, settings sub-screens): shared-axis slide.
+            enterTransition = {
+                if (isTabSwitch(initialState.destination.route, targetState.destination.route, mainTabRoutes)) {
+                    fadeThroughIn()
+                } else {
+                    pushEnter()
+                }
+            },
+            exitTransition = {
+                if (isTabSwitch(initialState.destination.route, targetState.destination.route, mainTabRoutes)) {
+                    fadeThroughOut()
+                } else {
+                    pushExit()
+                }
+            },
+            popEnterTransition = {
+                if (isTabSwitch(initialState.destination.route, targetState.destination.route, mainTabRoutes)) {
+                    fadeThroughIn()
+                } else {
+                    popEnter()
+                }
+            },
+            popExitTransition = {
+                if (isTabSwitch(initialState.destination.route, targetState.destination.route, mainTabRoutes)) {
+                    fadeThroughOut()
+                } else {
+                    popExit()
+                }
+            },
         ) {
-            composable(Screen.Home.route) {
+            paddedComposable(Screen.Home.route) {
                 HomeScreen(
                     onTrackClick = { track, queue -> onTrackClick(track, queue) },
                 )
             }
-            composable(Screen.Search.route) {
+            paddedComposable(Screen.Search.route) {
                 SearchScreen(
                     onArtistClick = { artist ->
                         val encodedId = URLEncoder.encode(artist.artistId, "UTF-8")
@@ -290,7 +412,7 @@ private fun AppContent() {
                     onBack = { navController.popBackStack() },
                 )
             }
-            composable(
+            paddedComposable(
                 route = "artist/{artistId}/songs",
                 arguments = listOf(navArgument("artistId") { type = NavType.StringType }),
             ) { entry ->
@@ -301,7 +423,7 @@ private fun AppContent() {
                     onBack = { navController.popBackStack() },
                 )
             }
-            composable(
+            paddedComposable(
                 route = "artist/{artistId}/albums",
                 arguments = listOf(navArgument("artistId") { type = NavType.StringType }),
             ) { entry ->
@@ -316,7 +438,7 @@ private fun AppContent() {
                     onBack = { navController.popBackStack() },
                 )
             }
-            composable(
+            paddedComposable(
                 route = "artist/{artistId}/singles",
                 arguments = listOf(navArgument("artistId") { type = NavType.StringType }),
             ) { entry ->
@@ -344,10 +466,10 @@ private fun AppContent() {
 
 
             }
-            composable("queue") {
+            paddedComposable("queue") {
                 QueueScreen(player = playerState, onBack = { navController.popBackStack() })
             }
-            composable(Screen.Player.route) {
+            paddedComposable(Screen.Player.route) {
                 PlayerScreen(
                     player = playerState,
                     onOpenQueue = { navController.navigate("queue") },
@@ -361,31 +483,55 @@ private fun AppContent() {
                     },
                 )
             }
-            composable(Screen.More.route) {
+            paddedComposable(Screen.More.route) {
                 MoreScreen(
-                    onOpenAccount = { navController.navigate("more/account") },
-                    onOpenAppearance = { navController.navigate("more/appearance") },
-                    onOpenPlayback = { navController.navigate("more/playback") },
+                    onOpenMusic = { navController.navigate("more/section/music") },
+                    onOpenSettings = { navController.navigate("more/section/settings") },
                     onOpenUpdates = { navController.navigate("more/updates") },
+                )
+            }
+            paddedComposable("more/section/music") {
+                MusicSectionScreen(
+                    onBack = { navController.popBackStack() },
                     onOpenOfflineTracks = { navController.navigate("more/offline_tracks") },
                     onOpenOfflineAlbums = { navController.navigate("more/offline_albums") },
                     onOpenTopTracks = { navController.navigate("more/top_tracks") },
                     onOpenTopArtists = { navController.navigate("more/top_artists") },
                 )
             }
-            composable("more/playback") {
+            paddedComposable("more/section/settings") {
+                SettingsSectionScreen(
+                    onBack = { navController.popBackStack() },
+                    onOpenAccount = { navController.navigate("more/account") },
+                    onOpenAppearance = { navController.navigate("more/appearance") },
+                    onOpenPlayback = { navController.navigate("more/playback") },
+                    onOpenEqualizer = { navController.navigate("more/equalizer") },
+                    onOpenTogether = { navController.navigate("more/together") },
+                    onOpenCache = { navController.navigate("more/cache") },
+                )
+            }
+            paddedComposable("more/cache") {
+                CacheScreen(onBack = { navController.popBackStack() })
+            }
+            paddedComposable("more/playback") {
                 PlaybackScreen(onBack = { navController.popBackStack() })
             }
-            composable("more/updates") {
+            paddedComposable("more/together") {
+                TogetherScreen(onBack = { navController.popBackStack() })
+            }
+            paddedComposable("more/equalizer") {
+                EqualizerScreen(onBack = { navController.popBackStack() })
+            }
+            paddedComposable("more/updates") {
                 UpdateScreen(onBack = { navController.popBackStack() })
             }
-            composable("more/top_tracks") {
+            paddedComposable("more/top_tracks") {
                 TopTracksScreen(
                     onTrackClick = onTrackClick,
                     onBack = { navController.popBackStack() },
                 )
             }
-            composable("more/top_artists") {
+            paddedComposable("more/top_artists") {
                 TopArtistsScreen(
                     onArtistClick = { artistId ->
                         val encodedId = URLEncoder.encode(artistId, "UTF-8")
@@ -394,22 +540,22 @@ private fun AppContent() {
                     onBack = { navController.popBackStack() },
                 )
             }
-            composable("more/account") {
+            paddedComposable("more/account") {
                 AccountScreen(
                     onTrackClick = onTrackClick,
                     onBack = { navController.popBackStack() },
                 )
             }
-            composable("more/appearance") {
+            paddedComposable("more/appearance") {
                 AppearanceScreen(onBack = { navController.popBackStack() })
             }
-            composable("more/offline_tracks") {
+            paddedComposable("more/offline_tracks") {
                 OfflineTracksScreen(
                     onTrackClick = onTrackClick,
                     onBack = { navController.popBackStack() },
                 )
             }
-            composable("more/offline_albums") {
+            paddedComposable("more/offline_albums") {
                 OfflineAlbumsScreen(
                     onAlbumClick = { albumId ->
 
@@ -419,7 +565,7 @@ private fun AppContent() {
                     onBack = { navController.popBackStack() },
                 )
             }
-            composable(
+            paddedComposable(
                 route = "more/offline_album/{albumId}",
                 arguments = listOf(navArgument("albumId") { type = NavType.StringType }),
             ) { entry ->
@@ -430,6 +576,7 @@ private fun AppContent() {
                     onBack = { navController.popBackStack() },
                 )
             }
+        }
         }
 
 
@@ -447,6 +594,7 @@ private fun AppContent() {
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
+                .onSizeChanged { dockHeightPx = it.height }
                 .navigationBarsPadding()
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             contentAlignment = Alignment.Center,
@@ -475,9 +623,7 @@ private fun AppContent() {
                     if (showMiniPlayer) {
                         MiniPlayerBar(
                             track = playingTrack!!,
-                            isPlaying = playerState.isPlaying,
-                            onOpenPlayer = { openPlayerTab() },
-                            onTogglePlay = { playerState.togglePlayPause() },
+                            player = playerState,
                         )
                         HorizontalDivider(
                             modifier = Modifier.padding(horizontal = 12.dp),
@@ -496,56 +642,227 @@ private fun AppContent() {
     }
 }
 
+/**
+ * Обычный экран: контент начинается под статус-баром.
+ * Экраны с баннером (артист, альбом) регистрируются через обычный composable —
+ * они сами рисуют картинку от самого верха и сами учитывают статус-бар.
+ */
+private fun NavGraphBuilder.paddedComposable(
+    route: String,
+    arguments: List<NamedNavArgument> = emptyList(),
+    content: @Composable (NavBackStackEntry) -> Unit,
+) {
+    composable(route = route, arguments = arguments) { entry ->
+        Box(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
+            content(entry)
+        }
+    }
+}
+
+/**
+ * Мини-плеер:
+ *  - тап по плееру — пауза/воспроизведение (в полный плеер не переходит);
+ *  - горизонтальный свайп — следующий/предыдущий трек;
+ *  - внизу по центру — seek bar.
+ */
 @Composable
 private fun MiniPlayerBar(
     track: Track,
-    isPlaying: Boolean,
-    onOpenPlayer: () -> Unit,
-    onTogglePlay: () -> Unit,
+    player: PlayerState,
 ) {
+    val scope = rememberCoroutineScope()
+    val offsetX = remember { Animatable(0f) }
+    val swipeThresholdPx = with(LocalDensity.current) { 64.dp.toPx() }
+    val maxShiftPx = with(LocalDensity.current) { 36.dp.toPx() }
+
+    var positionMs by remember(track.videoId) { mutableLongStateOf(0L) }
+    var durationMs by remember(track.videoId) {
+        mutableLongStateOf(track.durationSeconds?.toLong()?.times(1000L) ?: 0L)
+    }
+    var isSeeking by remember(track.videoId) { mutableStateOf(false) }
+    var seekFraction by remember(track.videoId) { mutableFloatStateOf(0f) }
+
+    LaunchedEffect(track.videoId) {
+        while (true) {
+            if (!isSeeking) {
+                val d = player.durationMs
+                if (d > 0L) durationMs = d
+                positionMs = if (player.isLoadingStream) 0L else player.positionMs
+            }
+            delay(250)
+        }
+    }
+
+    val safeDuration = durationMs.coerceAtLeast(1L)
+    val progress = if (isSeeking) {
+        seekFraction
+    } else {
+        (positionMs.toFloat() / safeDuration.toFloat()).coerceIn(0f, 1f)
+    }
+
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onOpenPlayer),
+            .clickable { player.togglePlayPause() }
+            .pointerInput(player) {
+                var total = 0f
+                detectHorizontalDragGestures(
+                    onDragStart = { total = 0f },
+                    onDragEnd = {
+                        val t = total
+                        scope.launch { offsetX.animateTo(0f, tween(180)) }
+                        if (t <= -swipeThresholdPx) {
+                            if (player.hasNext) player.playNext()
+                        } else if (t >= swipeThresholdPx) {
+                            if (player.hasPrevious) player.playPrevious()
+                        }
+                    },
+                    onDragCancel = {
+                        scope.launch { offsetX.animateTo(0f, tween(180)) }
+                    },
+                    onHorizontalDrag = { change, dx ->
+                        change.consume()
+                        total += dx
+                        scope.launch {
+                            offsetX.snapTo((total * 0.5f).coerceIn(-maxShiftPx, maxShiftPx))
+                        }
+                    },
+                )
+            },
         color = Color.Transparent,
         tonalElevation = 0.dp,
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 10.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            AsyncImage(
-                model = track.thumbnail,
-                contentDescription = track.title,
+            Row(
                 modifier = Modifier
-                    .size(40.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                    .fillMaxWidth()
+                    .offset { IntOffset(offsetX.value.roundToInt(), 0) }
+                    .padding(start = 10.dp, end = 10.dp, top = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AsyncImage(
+                    model = track.thumbnail,
+                    contentDescription = track.title,
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant),
+                )
+                Spacer(Modifier.width(10.dp))
+                Column(
+                    modifier = Modifier.weight(1f),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(
+                        text = track.title,
+                        style = MaterialTheme.typography.bodyMedium,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        text = track.artist,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                // Пустое место размером с обложку справа — чтобы текст был по центру капсулы.
+                Spacer(Modifier.width(50.dp))
+            }
+
+            MiniSeekBar(
+                progress = progress,
+                enabled = durationMs > 0L && !player.isLoadingStream,
+                isDragging = isSeeking,
+                onChange = { v ->
+                    isSeeking = true
+                    seekFraction = v
+                },
+                onFinished = {
+                    val target = (seekFraction * durationMs.coerceAtLeast(1L)).toLong()
+                    player.seekTo(target)
+                    positionMs = target
+                    isSeeking = false
+                },
+                modifier = Modifier
+                    .fillMaxWidth(0.92f)
+                    .padding(bottom = 2.dp),
             )
-            Spacer(Modifier.width(10.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = track.title,
-                    style = MaterialTheme.typography.bodyMedium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    text = track.artist,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+        }
+    }
+}
+
+/** Тонкий seek bar для мини-плеера: тап и перетаскивание. */
+@Composable
+private fun MiniSeekBar(
+    progress: Float,
+    enabled: Boolean,
+    isDragging: Boolean,
+    onChange: (Float) -> Unit,
+    onFinished: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val onChangeState by rememberUpdatedState(onChange)
+    val onFinishedState by rememberUpdatedState(onFinished)
+    val trackColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f)
+    val activeColor = MaterialTheme.colorScheme.primary.copy(alpha = if (enabled) 1f else 0.5f)
+    val barHeight by animateDpAsState(if (isDragging) 5.dp else 3.dp, label = "miniSeekHeight")
+    val thumbRadius by animateDpAsState(if (isDragging) 7.dp else 4.dp, label = "miniSeekThumb")
+
+    Box(
+        modifier = modifier
+            .height(22.dp)
+            .pointerInput(enabled) {
+                if (!enabled) return@pointerInput
+                detectTapGestures(
+                    onTap = { pos ->
+                        onChangeState((pos.x / size.width).coerceIn(0f, 1f))
+                        onFinishedState()
+                    },
                 )
             }
-            IconButton(onClick = onTogglePlay) {
-                Icon(
-                    imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
-                    contentDescription = if (isPlaying) LocalStrings.current.pause else LocalStrings.current.play,
+            .pointerInput(enabled) {
+                if (!enabled) return@pointerInput
+                detectHorizontalDragGestures(
+                    onDragStart = { pos -> onChangeState((pos.x / size.width).coerceIn(0f, 1f)) },
+                    onDragEnd = { onFinishedState() },
+                    onDragCancel = { onFinishedState() },
+                    onHorizontalDrag = { change, _ ->
+                        change.consume()
+                        onChangeState((change.position.x / size.width).coerceIn(0f, 1f))
+                    },
+                )
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(modifier = Modifier.fillMaxWidth().height(22.dp)) {
+            val w = size.width
+            val cy = size.height / 2f
+            val h = barHeight.toPx()
+            val x = progress.coerceIn(0f, 1f) * w
+            drawRoundRect(
+                color = trackColor,
+                topLeft = Offset(0f, cy - h / 2f),
+                size = Size(w, h),
+                cornerRadius = CornerRadius(h / 2f),
+            )
+            if (x > 0f) {
+                drawRoundRect(
+                    color = activeColor,
+                    topLeft = Offset(0f, cy - h / 2f),
+                    size = Size(x, h),
+                    cornerRadius = CornerRadius(h / 2f),
                 )
             }
+            drawCircle(color = activeColor, radius = thumbRadius.toPx(), center = Offset(x, cy))
         }
     }
 }

@@ -1,5 +1,6 @@
 package com.gammatunes.app.ui.screens
 
+import com.gammatunes.app.ui.components.dockPadding
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -64,7 +65,7 @@ fun UpdateScreen(onBack: () -> Unit) {
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 16.dp)
-                .padding(bottom = 300.dp),
+                .padding(bottom = dockPadding()),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             LiquidGlassSurface(

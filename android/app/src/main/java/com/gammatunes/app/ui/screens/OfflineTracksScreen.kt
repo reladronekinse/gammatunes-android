@@ -1,5 +1,6 @@
 package com.gammatunes.app.ui.screens
 
+import com.gammatunes.app.ui.components.dockPadding
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -134,9 +135,9 @@ fun OfflineTracksScreen(
                 )
             } else {
                 LazyColumn(
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                    contentPadding = PaddingValues(start = 16.dp, top = 12.dp, end = 16.dp, bottom = dockPadding()),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
-                    modifier = Modifier.fillMaxSize().padding(bottom = 100.dp),
+                    modifier = Modifier.fillMaxSize(),
                 ) {
                     items(filtered, key = { it.videoId }) { track ->
                         TrackRow(

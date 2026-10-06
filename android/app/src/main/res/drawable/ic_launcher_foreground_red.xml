@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!--
+        Точка в центре и три волны, расходящиеся от неё вверх.
+        Всё лежит в безопасной зоне adaptive-иконки (круг диаметром 66dp).
+        Геометрия продублирована в ui/components/GammaIcon.kt (для настроек и ярлыка).
+    -->
+    <path
+        android:fillColor="#EA3323"
+        android:pathData="M54,67 m-5,0 a5,5 0 1,1 10,0 a5,5 0 1,1 -10,0" />
+    <path
+        android:strokeColor="#EA3323"
+        android:strokeWidth="4.5"
+        android:strokeLineCap="round"
+        android:pathData="M44.81,59.29 A12,12 0 0 1 63.19,59.29" />
+    <path
+        android:strokeColor="#EA3323"
+        android:strokeWidth="4.5"
+        android:strokeLineCap="round"
+        android:pathData="M37.91,53.5 A21,21 0 0 1 70.09,53.5" />
+    <path
+        android:strokeColor="#EA3323"
+        android:strokeWidth="4.5"
+        android:strokeLineCap="round"
+        android:pathData="M31.02,47.72 A30,30 0 0 1 76.98,47.72" />
+</vector>

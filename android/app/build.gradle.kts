@@ -18,8 +18,8 @@ android {
         applicationId = "com.gammatunes.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.4-stable"
+        versionCode = 4
+        versionName = "0.5-unstable"
 
         ndk {
 
@@ -91,6 +91,12 @@ dependencies {
 
 
     implementation("androidx.media3:media3-datasource:1.4.1")
+
+    // Слушать вместе: MQTT через интернет (любое расстояние) + QR
+    implementation("org.eclipse.paho:org.eclipse.paho.client.mqttv3:1.2.5")
+    implementation("org.java-websocket:Java-WebSocket:1.5.7")
+    implementation("com.google.zxing:core:3.5.3")
+    implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

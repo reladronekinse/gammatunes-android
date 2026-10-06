@@ -1,5 +1,6 @@
 package com.gammatunes.app.ui.screens
 
+import com.gammatunes.app.ui.components.dockPadding
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
@@ -89,7 +90,7 @@ fun OfflineAlbumDetailScreen(
             }
         } else {
             LazyColumn(
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 300.dp),
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = dockPadding()),
             ) {
                 item {
                     Spacer(Modifier.height(8.dp))

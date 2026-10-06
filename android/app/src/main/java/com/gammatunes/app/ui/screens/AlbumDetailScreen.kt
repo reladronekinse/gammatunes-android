@@ -2,6 +2,7 @@
 
 package com.gammatunes.app.ui.screens
 
+import com.gammatunes.app.ui.components.dockPadding
 import androidx.compose.foundation.background
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.*
@@ -9,6 +10,13 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.text.font.FontWeight
+import com.gammatunes.app.ui.components.FadingBanner
+import com.gammatunes.app.ui.components.bannerBarAlpha
+import com.gammatunes.app.ui.components.bannerHeight
+import com.gammatunes.app.ui.components.bannerScrollPx
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -55,10 +63,22 @@ fun AlbumDetailScreen(
         }
     }
 
+    val listState = rememberLazyListState()
+    val hasBanner = album != null && !isLoading && error == null
+    val bannerH = bannerHeight(300.dp)
+    val barAlpha = if (hasBanner) listState.bannerBarAlpha(bannerH) else 0f
+
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(album?.title ?: strings.album, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                title = {
+                    Text(
+                        album?.title ?: strings.album,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.alpha(if (hasBanner) barAlpha else 1f),
+                    )
+                },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = strings.back)
@@ -76,48 +96,70 @@ fun AlbumDetailScreen(
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = androidx.compose.ui.graphics.Color.Transparent,
+                    containerColor = MaterialTheme.colorScheme.background.copy(alpha = barAlpha),
                 ),
             )
         },
         containerColor = androidx.compose.ui.graphics.Color.Transparent,
     ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .padding(horizontal = 16.dp),
-        ) {
-            when {
-                isLoading -> Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator()
-                }
-                error != null -> Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            val shownAlbum = album
+            if (hasBanner && shownAlbum != null) {
+                FadingBanner(
+                    imageUrl = shownAlbum.thumbnail,
+                    height = bannerH,
+                    scrollPx = { listState.bannerScrollPx() },
+                ) {
                     Text(
-                        text = "${strings.errorPrefix}$error",
-                        color = MaterialTheme.colorScheme.error,
+                        text = shownAlbum.title,
+                        style = MaterialTheme.typography.headlineLarge,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(start = 16.dp, end = 16.dp, bottom = 32.dp),
                     )
                 }
-                album != null -> {
-                    val loadedAlbum = album!!
-                    Spacer(Modifier.height(8.dp))
-                    AlbumHeader(title = loadedAlbum.title, thumbnail = loadedAlbum.thumbnail)
-                    Spacer(Modifier.height(16.dp))
-                    if (loadedAlbum.tracks.isEmpty()) {
+            }
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(if (hasBanner) PaddingValues(bottom = padding.calculateBottomPadding()) else padding)
+                    .padding(horizontal = 16.dp),
+            ) {
+                when {
+                    isLoading -> Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator()
+                    }
+                    error != null -> Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Text(
-                            text = strings.noTracksInAlbum,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            text = "${strings.errorPrefix}$error",
+                            color = MaterialTheme.colorScheme.error,
                         )
-                    } else {
+                    }
+                    album != null -> {
+                        val loadedAlbum = album!!
                         LazyColumn(
-                            contentPadding = PaddingValues(bottom = 24.dp),
+                            state = listState,
+                            contentPadding = PaddingValues(bottom = dockPadding()),
                         ) {
-                            itemsIndexed(loadedAlbum.tracks, key = { i, t -> "${i}:${t.videoId}" }) { index, track ->
-                                AlbumTrackRow(
-                                    number = index + 1,
-                                    track = track,
-                                    onClick = { onTrackClick(track, loadedAlbum.tracks) },
-                                )
+                            item { Spacer(Modifier.height(bannerH - 20.dp)) }
+                            if (loadedAlbum.tracks.isEmpty()) {
+                                item {
+                                    Text(
+                                        text = strings.noTracksInAlbum,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            } else {
+                                itemsIndexed(loadedAlbum.tracks, key = { i, t -> "${i}:${t.videoId}" }) { index, track ->
+                                    AlbumTrackRow(
+                                        number = index + 1,
+                                        track = track,
+                                        onClick = { onTrackClick(track, loadedAlbum.tracks) },
+                                    )
+                                }
                             }
                         }
                     }
@@ -203,9 +245,11 @@ private fun AlbumDownloadIconButton(
     IconButton(
         onClick = {
             scope.launch {
-                if (isDownloaded) {
+                if (isDownloading) {
+                    OfflineRepository.cancelAlbumDownload(albumId)
+                } else if (isDownloaded) {
                     OfflineRepository.deleteAlbum(albumId, deleteTrackFiles = true)
-                } else if (!isDownloading && tracks.isNotEmpty()) {
+                } else if (tracks.isNotEmpty()) {
                     OfflineRepository.downloadAlbum(
                         albumId = albumId,
                         title = title,

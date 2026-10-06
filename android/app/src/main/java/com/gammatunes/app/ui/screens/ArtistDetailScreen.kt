@@ -2,6 +2,7 @@
 
 package com.gammatunes.app.ui.screens
 
+import com.gammatunes.app.ui.components.dockPadding
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -10,6 +11,13 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.text.font.FontWeight
+import com.gammatunes.app.ui.components.FadingBanner
+import com.gammatunes.app.ui.components.bannerBarAlpha
+import com.gammatunes.app.ui.components.bannerHeight
+import com.gammatunes.app.ui.components.bannerScrollPx
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -61,6 +69,11 @@ fun ArtistDetailScreen(
         }
     }
 
+    val listState = rememberLazyListState()
+    val hasBanner = artist != null && !isLoading && error == null
+    val bannerH = bannerHeight(300.dp)
+    val barAlpha = if (hasBanner) listState.bannerBarAlpha(bannerH) else 0f
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -69,6 +82,7 @@ fun ArtistDetailScreen(
                         artist?.name ?: strings.artist,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.alpha(if (hasBanner) barAlpha else 1f),
                     )
                 },
                 navigationIcon = {
@@ -77,16 +91,36 @@ fun ArtistDetailScreen(
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = androidx.compose.ui.graphics.Color.Transparent,
+                    containerColor = MaterialTheme.colorScheme.background.copy(alpha = barAlpha),
                 ),
             )
         },
         containerColor = androidx.compose.ui.graphics.Color.Transparent,
     ) { padding ->
+        Box(modifier = Modifier.fillMaxSize()) {
+        val shownArtist = artist
+        if (hasBanner && shownArtist != null) {
+            FadingBanner(
+                imageUrl = shownArtist.banner ?: shownArtist.thumbnail,
+                height = bannerH,
+                scrollPx = { listState.bannerScrollPx() },
+            ) {
+                Text(
+                    text = shownArtist.name,
+                    style = MaterialTheme.typography.headlineLarge,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(start = 16.dp, end = 16.dp, bottom = 32.dp),
+                )
+            }
+        }
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
+                .padding(if (hasBanner) PaddingValues(bottom = padding.calculateBottomPadding()) else padding)
                 .padding(horizontal = 16.dp),
         ) {
             when {
@@ -102,13 +136,12 @@ fun ArtistDetailScreen(
                 artist != null -> {
                     val loadedArtist = artist!!
                     LazyColumn(
-                        contentPadding = PaddingValues(bottom = 24.dp),
+                        state = listState,
+                        contentPadding = PaddingValues(bottom = dockPadding()),
                     ) {
-                        item {
-                            Spacer(Modifier.height(8.dp))
-                            ArtistHeader(artist = loadedArtist)
-                            Spacer(Modifier.height(20.dp))
-                        }
+                        // Место под баннер: список начинается чуть выше его нижнего края,
+                        // так что первый блок «заезжает» в затухающую часть картинки.
+                        item { Spacer(Modifier.height(bannerH - 24.dp)) }
 
 
                         if (loadedArtist.songs.isNotEmpty()) {
@@ -238,6 +271,7 @@ fun ArtistDetailScreen(
                     }
                 }
             }
+        }
         }
     }
 }

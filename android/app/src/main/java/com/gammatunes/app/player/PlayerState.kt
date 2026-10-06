@@ -50,6 +50,25 @@ class PlayerState(private val context: Context, private val scope: CoroutineScop
     private var controllerFuture: ListenableFuture<MediaController>? = null
     private var mediaController: MediaController? = null
 
+    /**
+     * Хуки для «слушать вместе» (см. together/TogetherSession). Вызываются из главного потока
+     * после любого изменения, в том числе вызванного удалённым устройством — дедупликацию
+     * эхо-событий делает сам слушатель.
+     */
+    interface SyncListener {
+        fun onTrackStarted(track: Track, queue: List<Track>, index: Int)
+        fun onPlayWhenReadyChanged(playWhenReady: Boolean, positionMs: Long)
+        fun onSeeked(positionMs: Long)
+        fun onQueueChanged(queue: List<Track>, index: Int)
+    }
+
+    var syncListener: SyncListener? = null
+
+    /** Треки очереди (проигранные, текущий и следующие) без служебных uid. */
+    val queueTracks: List<Track> get() = queueEntries.map { it.track }
+
+    val playWhenReady: Boolean get() = boundPlayer?.playWhenReady ?: false
+
     var currentTrack by mutableStateOf<Track?>(null)
         private set
     var isPlaying by mutableStateOf(false)
@@ -60,6 +79,43 @@ class PlayerState(private val context: Context, private val scope: CoroutineScop
         private set
     var repeatMode by mutableStateOf(RepeatMode.OFF)
         private set
+
+    /**
+     * Пользователь выбрал режим «клип» (видео-поток) для текущего трека.
+     * При смене трека сбрасывается в [Track.isVideo] (видео-результаты YouTube остаются клипами).
+     */
+    var preferVideo by mutableStateOf(false)
+        private set
+
+    /** Фактически играет видео-поток (TextureView в плеере). */
+    var isPlayingVideo by mutableStateOf(false)
+        private set
+
+    /**
+     * Увеличивается после каждой загрузки stream'а. Плеер использует это как key
+     * для AndroidView, чтобы TextureView пересоздался и surface привязался заново
+     * без ухода с экрана.
+     */
+    var videoSurfaceEpoch by mutableIntStateOf(0)
+        private set
+
+    /** videoId, для которого запрос клипа уже провалился — переключатель скрываем. */
+    var videoUnavailableId by mutableStateOf<String?>(null)
+        private set
+
+    /**
+     * Переключает аудио ↔ клип и перезагружает поток с текущей позиции.
+     * Для SoundCloud недоступно (только аудио).
+     * Не setPreferVideo — иначе clash с JVM-сеттером свойства preferVideo.
+     */
+    fun switchToVideoMode(enabled: Boolean) {
+        val track = currentTrack ?: return
+        if (track.isSoundCloud) return
+        if (preferVideo == enabled) return
+        preferVideo = enabled
+        val pos = boundPlayer?.currentPosition?.coerceAtLeast(0L) ?: 0L
+        loadAndPlay(track, resumePositionMs = pos)
+    }
 
     fun cycleRepeatMode() {
         repeatMode = when (repeatMode) {
@@ -79,8 +135,12 @@ class PlayerState(private val context: Context, private val scope: CoroutineScop
 
     private val queue: List<Track> get() = queueEntries.map { it.track }
 
+    /** Гость в «слушать вместе» — локальное управление отключено, команды идут только от хозяина. */
+    private fun isRemoteLocked(): Boolean = com.gammatunes.app.together.TogetherSession.isGuest()
+
     /** "Play next": insert right after the current track (moves it if it is already queued). */
     fun enqueueNext(track: Track) {
+        if (isRemoteLocked()) return
         val idx = queueIndex
         if (currentTrack == null || idx !in queueEntries.indices) {
             play(track)
@@ -96,9 +156,11 @@ class PlayerState(private val context: Context, private val scope: CoroutineScop
         list.add(current + 1, QueueEntry(nextQueueUid++, track))
         queueEntries = list
         queueIndex = current
+        syncListener?.onQueueChanged(queue, queueIndex)
     }
 
     fun moveQueueItem(from: Int, to: Int) {
+        if (isRemoteLocked()) return
         val list = queueEntries.toMutableList()
         if (from !in list.indices || to !in list.indices || from == to) return
         list.add(to, list.removeAt(from))
@@ -109,16 +171,20 @@ class PlayerState(private val context: Context, private val scope: CoroutineScop
             from > queueIndex && to <= queueIndex -> queueIndex + 1
             else -> queueIndex
         }
+        syncListener?.onQueueChanged(queue, queueIndex)
     }
 
     /** Removes an upcoming/played item; the currently playing slot can't be removed. */
     fun removeQueueItem(index: Int) {
+        if (isRemoteLocked()) return
         if (index !in queueEntries.indices || index == queueIndex) return
         queueEntries = queueEntries.toMutableList().also { it.removeAt(index) }
         if (index < queueIndex) queueIndex--
+        syncListener?.onQueueChanged(queue, queueIndex)
     }
 
     fun playQueueIndex(index: Int) {
+        if (isRemoteLocked()) return
         val entry = queueEntries.getOrNull(index) ?: return
         if (index == queueIndex) {
             togglePlayPause()
@@ -127,6 +193,7 @@ class PlayerState(private val context: Context, private val scope: CoroutineScop
         queueIndex = index
         PlayHistoryRepository.record(entry.track)
         PlayStatsRepository.record(entry.track)
+        preferVideo = entry.track.isVideo
         loadAndPlay(entry.track)
     }
 
@@ -158,6 +225,18 @@ class PlayerState(private val context: Context, private val scope: CoroutineScop
         }
 
     fun seekTo(positionMs: Long) {
+        // applyRemote* / TogetherSession вызывают seekTo для синхронизации гостя —
+        // блокируем только пользовательские seek через isRemoteLocked в UI-путях
+        // и через проверку: если гость сам тянет ползунок, seek придёт отсюда.
+        // Разрешаем seek когда он вызван из applyRemote (synced). Простая эвристика:
+        // гость может seek только если locked не стоит... поэтому для remote apply
+        // используем forceSeek, а обычный seekTo блокируем у гостя.
+        if (isRemoteLocked()) return
+        boundPlayer?.seekTo(positionMs.coerceAtLeast(0L))
+    }
+
+    /** Принудительная перемотка (команда хозяина / heartbeat), игнорирует remote-lock. */
+    fun forceSeekTo(positionMs: Long) {
         boundPlayer?.seekTo(positionMs.coerceAtLeast(0L))
     }
 
@@ -199,11 +278,28 @@ class PlayerState(private val context: Context, private val scope: CoroutineScop
                 isPlaying = playing
             }
 
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+                // Только действия пользователя: потеря аудиофокуса (звонок) не должна ставить на паузу друга.
+                if (reason == Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST) {
+                    syncListener?.onPlayWhenReadyChanged(playWhenReady, player.currentPosition)
+                }
+            }
+
+            override fun onPositionDiscontinuity(
+                oldPosition: Player.PositionInfo,
+                newPosition: Player.PositionInfo,
+                reason: Int,
+            ) {
+                if (reason == Player.DISCONTINUITY_REASON_SEEK) {
+                    syncListener?.onSeeked(newPosition.positionMs)
+                }
+            }
+
             override fun onPlaybackStateChanged(state: Int) {
                 if (state == Player.STATE_ENDED) {
                     currentTrack?.let { finished ->
                         if (!OfflineRepository.isDownloaded(finished.videoId)) {
-                            OfflineRepository.download(finished)
+                            OfflineRepository.download(finished, maxAttempts = 3)
                         }
                     }
                     when (repeatMode) {
@@ -219,6 +315,7 @@ class PlayerState(private val context: Context, private val scope: CoroutineScop
                                 val t = queue[queueIndex]
                                 PlayHistoryRepository.record(t)
                                 PlayStatsRepository.record(t)
+                                preferVideo = t.isVideo
                                 loadAndPlay(t)
                             }
                         }
@@ -244,6 +341,7 @@ class PlayerState(private val context: Context, private val scope: CoroutineScop
     }
 
     fun play(track: Track, queue: List<Track> = listOf(track)) {
+        if (isRemoteLocked()) return
         this.queueEntries = queue.map { QueueEntry(nextQueueUid++, it) }
         this.queueIndex = queue.indexOfFirst { it.videoId == track.videoId }.let {
             if (it >= 0) it else 0
@@ -254,27 +352,65 @@ class PlayerState(private val context: Context, private val scope: CoroutineScop
             togglePlayPause()
             return
         }
+        preferVideo = track.isVideo
         loadAndPlay(track)
     }
 
     fun playNext() {
+        if (isRemoteLocked()) return
         val next = nextPlayableIndex()
         if (next < 0) return
         queueIndex = next
         val t = queue[queueIndex]
         PlayHistoryRepository.record(t)
         PlayStatsRepository.record(t)
+        preferVideo = t.isVideo
         loadAndPlay(t)
     }
 
     fun playPrevious() {
+        if (isRemoteLocked()) return
         val previous = previousPlayableIndex()
         if (previous < 0) return
         queueIndex = previous
         val t = queue[queueIndex]
         PlayHistoryRepository.record(t)
         PlayStatsRepository.record(t)
+        preferVideo = t.isVideo
         loadAndPlay(t)
+    }
+
+    /** Запуск трека по команде удалённого устройства (слушаем вместе). */
+    fun applyRemoteTrack(
+        track: Track,
+        queue: List<Track>,
+        index: Int,
+        positionMs: Long,
+        startPlaying: Boolean,
+    ) {
+        queueEntries = queue.map { QueueEntry(nextQueueUid++, it) }
+        queueIndex = index.takeIf { it in queue.indices && queue[it].videoId == track.videoId }
+            ?: queue.indexOfFirst { it.videoId == track.videoId }.let { if (it >= 0) it else 0 }
+        PlayHistoryRepository.record(track)
+        PlayStatsRepository.record(track)
+        preferVideo = track.isVideo
+        loadAndPlay(track, resumePositionMs = positionMs.coerceAtLeast(0L), startPlaying = startPlaying)
+    }
+
+    /** Заменяет очередь по команде удалённого устройства, не трогая текущее воспроизведение. */
+    fun applyRemoteQueue(queue: List<Track>, currentVideoId: String?) {
+        if (queue.isEmpty()) return
+        queueEntries = queue.map { QueueEntry(nextQueueUid++, it) }
+        val idx = queue.indexOfFirst { it.videoId == currentVideoId }
+        queueIndex = if (idx >= 0) idx else queueIndex.coerceIn(0, queue.lastIndex)
+    }
+
+    /** Явная пауза/продолжение (в отличие от [togglePlayPause]). */
+    fun setRemotePlaying(play: Boolean) {
+        scope.launch {
+            val player = awaitPlayer() ?: return@launch
+            if (play) player.play() else player.pause()
+        }
     }
 
     private var retryAttempted = false
@@ -294,7 +430,12 @@ class PlayerState(private val context: Context, private val scope: CoroutineScop
             .build()
     }
 
-    private fun loadAndPlay(track: Track, resumePositionMs: Long = 0L, isRetry: Boolean = false) {
+    private fun loadAndPlay(
+        track: Track,
+        resumePositionMs: Long = 0L,
+        isRetry: Boolean = false,
+        startPlaying: Boolean = true,
+    ) {
         retryAttempted = if (isRetry) {
             if (retryAttempted) return
             true
@@ -303,20 +444,25 @@ class PlayerState(private val context: Context, private val scope: CoroutineScop
         }
         currentTrack = track
         streamError = null
+        isPlayingVideo = false
+        if (!isRetry) syncListener?.onTrackStarted(track, queueTracks, queueIndex)
 
-        val offlineTrack = OfflineRepository.localTrack(track.videoId)
+        // Для режима «клип» не берём локальный аудиофайл — нужен онлайн video-stream.
+        val offlineTrack = if (!preferVideo) OfflineRepository.localTrack(track.videoId) else null
         if (offlineTrack != null) {
             isLoadingStream = false
+            isPlayingVideo = false
             scope.launch {
                 val player = awaitPlayer() ?: run {
                     streamError = "Плеер не готов"
                     return@launch
                 }
                 try {
+                    runCatching { player.clearVideoSurface() }
                     val uri = android.net.Uri.fromFile(java.io.File(offlineTrack.filePath))
                     player.setMediaItem(mediaItemFor(track, uri), resumePositionMs)
                     player.prepare()
-                    player.playWhenReady = true
+                    player.playWhenReady = startPlaying
                 } catch (e: Exception) {
                     streamError = e.message ?: "Не удалось воспроизвести скачанный трек"
                 }
@@ -326,33 +472,96 @@ class PlayerState(private val context: Context, private val scope: CoroutineScop
 
         isLoadingStream = true
         scope.launch {
+            val wantVideo = preferVideo && !track.isSoundCloud
             try {
                 val quality = PlaybackSettingsRepository.settings.value.quality.apiValue
                 val stream = ApiClient.api.stream(
                     track.videoId,
                     quality = quality,
-                    video = if (track.isVideo) 1 else null,
+                    video = if (wantVideo) 1 else 0,
                 )
                 val player = awaitPlayer() ?: run {
                     streamError = "Плеер не готов"
                     return@launch
                 }
+                runCatching { player.clearVideoSurface() }
                 val dataSourceFactory = DefaultHttpDataSource.Factory().apply {
                     setAllowCrossProtocolRedirects(true)
                     setConnectTimeoutMs(20_000)
                     setReadTimeoutMs(20_000)
+                    if (stream.httpHeaders.isNotEmpty()) {
+                        setDefaultRequestProperties(stream.httpHeaders)
+                    }
                 }
-                val item = mediaItemFor(track, android.net.Uri.parse(stream.streamUrl))
-                val mediaSource = if (stream.isHls) {
+                // Клип запросили, а пришёл не-видео — не играем этот URL как клип,
+                // откатываемся на трек, но переключатель НЕ блокируем навсегда.
+                val playStream = if (wantVideo && !stream.isVideoStream) {
+                    preferVideo = false
+                    ApiClient.api.stream(track.videoId, quality = quality, video = 0)
+                } else {
+                    stream
+                }
+                if (playStream.httpHeaders.isNotEmpty()) {
+                    dataSourceFactory.setDefaultRequestProperties(playStream.httpHeaders)
+                }
+                val item = mediaItemFor(track, android.net.Uri.parse(playStream.streamUrl))
+                val mediaSource = if (playStream.isHls) {
                     HlsMediaSource.Factory(dataSourceFactory).createMediaSource(item)
                 } else {
                     ProgressiveMediaSource.Factory(dataSourceFactory).createMediaSource(item)
                 }
                 player.setMediaSource(mediaSource, resumePositionMs)
                 player.prepare()
-                player.playWhenReady = true
+                player.playWhenReady = startPlaying
+                isPlayingVideo = playStream.isVideoStream
+                if (playStream.isVideoStream && videoUnavailableId == track.videoId) {
+                    videoUnavailableId = null
+                }
+                videoSurfaceEpoch++
             } catch (e: Exception) {
-                streamError = e.backendMessage().ifBlank { "Не удалось получить аудиопоток" }
+                isPlayingVideo = false
+                val msg = e.backendMessage().ifBlank {
+                    if (wantVideo) "Не удалось получить видео-поток" else "Не удалось получить аудиопоток"
+                }
+                if (wantVideo) {
+                    // Откат на трек, плашку оставляем — можно попробовать клип снова
+                    preferVideo = false
+                    streamError = msg
+                    try {
+                        val quality = PlaybackSettingsRepository.settings.value.quality.apiValue
+                        val audio = ApiClient.api.stream(track.videoId, quality = quality, video = 0)
+                        val player = awaitPlayer() ?: run {
+                            streamError = "Плеер не готов"
+                            return@launch
+                        }
+                        runCatching { player.clearVideoSurface() }
+                        val dataSourceFactory = DefaultHttpDataSource.Factory().apply {
+                            setAllowCrossProtocolRedirects(true)
+                            setConnectTimeoutMs(20_000)
+                            setReadTimeoutMs(20_000)
+                            if (audio.httpHeaders.isNotEmpty()) {
+                                setDefaultRequestProperties(audio.httpHeaders)
+                            }
+                        }
+                        val item = mediaItemFor(track, android.net.Uri.parse(audio.streamUrl))
+                        val mediaSource = if (audio.isHls) {
+                            HlsMediaSource.Factory(dataSourceFactory).createMediaSource(item)
+                        } else {
+                            ProgressiveMediaSource.Factory(dataSourceFactory).createMediaSource(item)
+                        }
+                        player.setMediaSource(mediaSource, resumePositionMs)
+                        player.prepare()
+                        player.playWhenReady = startPlaying
+                        isPlayingVideo = false
+                        videoSurfaceEpoch++
+                        // Трек играет — не держим красную ошибку; плашка клипа остаётся
+                        streamError = null
+                    } catch (e2: Exception) {
+                        streamError = e2.backendMessage().ifBlank { msg }
+                    }
+                } else {
+                    streamError = msg
+                }
             } finally {
                 isLoadingStream = false
             }
@@ -389,6 +598,7 @@ class PlayerState(private val context: Context, private val scope: CoroutineScop
     }
 
     fun togglePlayPause() {
+        if (isRemoteLocked()) return
         scope.launch {
             val player = awaitPlayer() ?: return@launch
             if (player.isPlaying) player.pause() else player.play()

@@ -2,6 +2,7 @@
 
 package com.gammatunes.app.ui.screens
 
+import com.gammatunes.app.ui.components.LocalDockInset
 import androidx.media3.common.util.UnstableApi
 
 
@@ -17,6 +18,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -32,6 +34,7 @@ import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Lyrics
+import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -50,6 +53,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -134,9 +138,12 @@ fun PlayerScreen(
     var seekFraction by remember(track.videoId) { mutableFloatStateOf(0f) }
     var showLyrics by remember(track.videoId) { mutableStateOf(false) }
     var lyrics by remember(track.videoId) { mutableStateOf<LyricsResult?>(null) }
-    // Videos have no album/artist pages or synced lyrics — keep those UIs off
-    val lyricsEnabled = !track.isVideo
+    // Видео-поток: нет смысла в синхротексте поверх клипа
+    val playingVideo = player.isPlayingVideo
+    val lyricsEnabled = !playingVideo
     val effectiveShowLyrics = showLyrics && lyricsEnabled
+    // Не прячем плашку после ошибки клипа — можно переключить снова
+    val canToggleVideo = !track.isSoundCloud
 
     // SurfaceView/PlayerView can remain as a top-level window and freeze the UI after
     // leaving the player. TextureView + explicit clear prevents that.
@@ -145,13 +152,12 @@ fun PlayerScreen(
             runCatching { PlayerBridge.player?.clearVideoSurface() }
         }
     }
-    DisposableEffect(track.videoId, track.isVideo) {
-        onDispose {
-            runCatching { PlayerBridge.player?.clearVideoSurface() }
-        }
-    }
-    LaunchedEffect(track.videoId, track.isVideo) {
-        if (!track.isVideo) {
+    // NB: no DisposableEffect keyed on track/playingVideo here. Its onDispose runs AFTER the new
+    // TextureView is attached (playingVideo false -> true) and would clear the surface that was
+    // just bound, so the clip stayed black until re-entering the screen. The AndroidView's
+    // onRelease below already detaches its own TextureView.
+    LaunchedEffect(track.videoId, playingVideo) {
+        if (!playingVideo) {
             runCatching { PlayerBridge.player?.clearVideoSurface() }
         }
     }
@@ -290,7 +296,7 @@ fun PlayerScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(24.dp)
-                .padding(bottom = 16.dp),
+                .padding(bottom = LocalDockInset.current),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
         ) {
@@ -300,9 +306,24 @@ fun PlayerScreen(
                 CoverStyle.CIRCLE -> CircleShape
             }
 
+            if (canToggleVideo) {
+                TrackClipCapsule(
+                    preferVideo = player.preferVideo,
+                    enabled = !player.isLoadingStream,
+                    trackLabel = strings.playerModeTrack,
+                    clipLabel = strings.playerModeClip,
+                    onSelectTrack = {
+                        if (player.preferVideo) player.switchToVideoMode(false)
+                    },
+                    onSelectClip = {
+                        if (!player.preferVideo) player.switchToVideoMode(true)
+                    },
+                )
+                Spacer(Modifier.height(12.dp))
+            }
 
-            // Videos always use the art slot so the stream is visible
-            val showCoverInSlot = track.isVideo || ui.backgroundStyle != BackgroundStyle.FULL_COVER
+            // Клип всегда занимает слот обложки, чтобы был виден видеопоток
+            val showCoverInSlot = playingVideo || ui.backgroundStyle != BackgroundStyle.FULL_COVER
             val artSpacer by animateDpAsState(
                 targetValue = if (effectiveShowLyrics) 12.dp else 24.dp,
                 animationSpec = tween(durationMillis = 280, easing = FastOutSlowInEasing),
@@ -332,33 +353,37 @@ fun PlayerScreen(
                 contentAlignment = Alignment.Center,
             ) {
                 if (showCoverInSlot) {
-                    if (track.isVideo) {
-                        // TextureView (not SurfaceView/PlayerView) so video can't float
-                        // above other screens and steal all touch events after navigation.
-                        AndroidView(
-                            factory = { ctx ->
-                                TextureView(ctx).apply {
-                                    isOpaque = true
-                                    isClickable = false
-                                    isFocusable = false
-                                }
-                            },
-                            update = { tv ->
-                                val exo = PlayerBridge.player
-                                if (exo != null) {
-                                    exo.setVideoTextureView(tv)
-                                }
-                            },
-                            onRelease = { tv ->
-                                runCatching {
-                                    PlayerBridge.player?.clearVideoTextureView(tv)
-                                }
-                            },
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .graphicsLayer { alpha = coverAlpha }
-                                .clip(coverShape),
-                        )
+                    if (playingVideo) {
+                        // key(epoch) — пересоздаём TextureView после каждой смены потока,
+                        // иначе surface не привязывается без ухода с экрана.
+                        key(track.videoId, player.videoSurfaceEpoch) {
+                            // TextureView (not SurfaceView/PlayerView) so video can't float
+                            // above other screens and steal all touch events after navigation.
+                            AndroidView(
+                                factory = { ctx ->
+                                    TextureView(ctx).apply {
+                                        isOpaque = true
+                                        isClickable = false
+                                        isFocusable = false
+                                    }
+                                },
+                                update = { tv ->
+                                    val exo = PlayerBridge.player
+                                    if (exo != null) {
+                                        exo.setVideoTextureView(tv)
+                                    }
+                                },
+                                onRelease = { tv ->
+                                    runCatching {
+                                        PlayerBridge.player?.clearVideoTextureView(tv)
+                                    }
+                                },
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .graphicsLayer { alpha = coverAlpha }
+                                    .clip(coverShape),
+                            )
+                        }
                     } else {
                         AsyncImage(
                             model = track.thumbnail,
@@ -391,7 +416,7 @@ fun PlayerScreen(
             }
             Spacer(modifier = Modifier.height(artSpacer))
 
-            val canOpenAlbum = !track.isVideo && !track.albumId.isNullOrBlank()
+            val canOpenAlbum = !playingVideo && !track.albumId.isNullOrBlank()
             AutoSizeSingleLineText(
                 text = track.title,
                 style = MaterialTheme.typography.titleLarge.copy(
@@ -758,6 +783,7 @@ fun PlayerScreen(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
+                    .padding(bottom = LocalDockInset.current)
                     .padding(horizontal = 16.dp, vertical = 12.dp),
                 shape = RoundedCornerShape(16.dp),
                 color = MaterialTheme.colorScheme.errorContainer,
@@ -1265,6 +1291,87 @@ private fun SyncedLyricsView(
                     }
                 }
             }
+        }
+    }
+}
+
+/** Единая капсула «Трек | Клип» с вертикальным разделителем посередине. */
+@Composable
+private fun TrackClipCapsule(
+    preferVideo: Boolean,
+    enabled: Boolean,
+    trackLabel: String,
+    clipLabel: String,
+    onSelectTrack: () -> Unit,
+    onSelectClip: () -> Unit,
+) {
+    val shape = RoundedCornerShape(50)
+    val selectedBg = MaterialTheme.colorScheme.primary.copy(alpha = 0.22f)
+    val selectedFg = MaterialTheme.colorScheme.primary
+    val idleFg = Color.White.copy(alpha = 0.85f)
+
+    Row(
+        modifier = Modifier
+            .height(36.dp)
+            .clip(shape)
+            .background(Color.White.copy(alpha = 0.10f))
+            .border(1.dp, Color.White.copy(alpha = 0.18f), shape),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxHeight()
+                .clip(RoundedCornerShape(topStart = 50.dp, bottomStart = 50.dp))
+                .background(if (!preferVideo) selectedBg else Color.Transparent)
+                .clickable(enabled = enabled, onClick = onSelectTrack)
+                .padding(horizontal = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Icon(
+                Icons.Default.MusicNote,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = if (!preferVideo) selectedFg else idleFg,
+            )
+            Text(
+                trackLabel,
+                style = MaterialTheme.typography.labelLarge,
+                color = if (!preferVideo) selectedFg else idleFg,
+                maxLines = 1,
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .width(1.dp)
+                .fillMaxHeight()
+                .padding(vertical = 8.dp)
+                .background(Color.White.copy(alpha = 0.28f)),
+        )
+
+        Row(
+            modifier = Modifier
+                .fillMaxHeight()
+                .clip(RoundedCornerShape(topEnd = 50.dp, bottomEnd = 50.dp))
+                .background(if (preferVideo) selectedBg else Color.Transparent)
+                .clickable(enabled = enabled, onClick = onSelectClip)
+                .padding(horizontal = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Icon(
+                Icons.Default.Movie,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = if (preferVideo) selectedFg else idleFg,
+            )
+            Text(
+                clipLabel,
+                style = MaterialTheme.typography.labelLarge,
+                color = if (preferVideo) selectedFg else idleFg,
+                maxLines = 1,
+            )
         }
     }
 }

@@ -13,6 +13,7 @@ rather run it on a PC or server instead of on-device.
 
 ```
 android/    Android client (Kotlin, Jetpack Compose)
+backend/    Standalone FastAPI backend (optional, PC/server use)
 ```
 
 ## Building
@@ -32,7 +33,19 @@ cd android
 The resulting APK will be at
 `android/app/build/outputs/apk/debug/app-debug.apk`.
 
-## Features (0.4-stable)
+### Standalone backend (optional)
+
+```bash
+cd backend
+pip install -r requirements.txt
+uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+To point the app at an external backend instead of the on-device one, change
+`LocalBackend.BASE_URL` in
+`android/app/src/main/java/com/gammatunes/app/backend/LocalBackend.kt`.
+
+## Features (0.5-unstable)
 
 - Embedded Python backend (ytmusicapi + yt-dlp) via Chaquopy
 - Material 3 UI with Liquid Glass surfaces
@@ -55,7 +68,11 @@ The resulting APK will be at
   likes, your/liked playlists, add-to-playlist, artist pages (popular tracks,
   albums, playlists)
 - Account screen with a YouTube Music / SoundCloud switch (liked songs, playlists)
-- Appearance settings (cover style, seek bar, accents)
+- Listen together: show a QR, a friend scans it, and playback (track, queue, play/pause,
+  seek) is synced between two phones over the local Wi-Fi — each phone streams the music itself
+- Appearance settings (cover style, seek bar, accents, app icon colors)
+- Equalizer with sound profiles (Flat, Bass, Treble, Vocal, Rock, Pop, Jazz, Classical,
+  Electronic, Hip-Hop, Acoustic) and a custom per-band mode
 - EN / RU localization
 
 ### SoundCloud account notes

@@ -1,5 +1,6 @@
 package com.gammatunes.app.ui.screens
 
+import com.gammatunes.app.ui.components.dockPadding
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
@@ -66,7 +67,7 @@ fun OfflineScreen(onTrackClick: (Track, List<Track>) -> Unit) {
         } else {
             LazyColumn(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
-                contentPadding = PaddingValues(bottom = 24.dp),
+                contentPadding = PaddingValues(bottom = dockPadding()),
             ) {
                 items(tracks, key = { it.videoId }) { track ->
                     OfflineTrackRow(track = track, onClick = { onTrackClick(track, tracks) })

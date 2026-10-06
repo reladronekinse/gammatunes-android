@@ -1,5 +1,6 @@
 package com.gammatunes.app.ui.screens
 
+import com.gammatunes.app.ui.components.dockPadding
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -94,7 +95,7 @@ fun AccountScreen(
 
         LazyColumn(
             modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
-            contentPadding = PaddingValues(top = 8.dp, bottom = 300.dp),
+            contentPadding = PaddingValues(top = 8.dp, bottom = dockPadding()),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             item {

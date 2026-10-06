@@ -15,6 +15,16 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
+import com.gammatunes.app.network.NetworkMonitor
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
@@ -39,8 +49,21 @@ data class OfflineAlbum(
     val trackIds: List<String> = emptyList(),
 )
 
+/** Ошибка, при которой повтор бессмысленен (например, файл слишком большой). */
+class PermanentDownloadException(message: String) : java.io.IOException(message)
+
 object OfflineRepository {
     private const val TAG = "OfflineRepository"
+
+    /** Повторять до успеха. */
+    const val UNLIMITED_ATTEMPTS = Int.MAX_VALUE
+    private const val ATTEMPT_TIMEOUT_MS = 180_000L
+    private const val RETRY_BASE_DELAY_MS = 2_000L
+    private const val RETRY_MAX_DELAY_MS = 20_000L
+    private const val NETWORK_WAIT_MS = 30_000L
+
+    private val trackJobs = ConcurrentHashMap<String, Job>()
+    private val albumJobs = ConcurrentHashMap<String, Job>()
 
 
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -132,18 +155,53 @@ object OfflineRepository {
     private fun offlineDir(): File =
         File(appContext.filesDir, "offline").apply { if (!exists()) mkdirs() }
 
+    /** Папка с файлами скачанных треков (нужна экспорту/импорту кеша). */
+    fun offlineDirectory(): File = offlineDir()
 
-    fun download(track: Track) {
+    /** Трек есть в кеше и его файл на месте. */
+    fun hasValidFile(videoId: String): Boolean {
+        val offline = _index.value[videoId] ?: return false
+        val f = File(offline.filePath)
+        return f.exists() && f.length() >= 8 * 1024L
+    }
+
+    /**
+     * Добавляет импортированные треки и альбомы к текущим. Существующие записи не перезаписываются.
+     * Альбом добавляется только если в кеше есть все его треки (как и при обычном скачивании).
+     */
+    fun mergeImported(tracks: Collection<OfflineTrack>, albums: Collection<OfflineAlbum>) {
+        if (tracks.isNotEmpty()) {
+            _index.update { current ->
+                current + tracks
+                    .filter { !current.containsKey(it.track.videoId) }
+                    .associateBy { it.track.videoId }
+            }
+            persistIndexToDisk()
+        }
+        val idx = _index.value
+        val toAdd = albums
+            .filter { a -> !_albums.value.containsKey(a.albumId) && a.trackIds.isNotEmpty() && a.trackIds.all { idx.containsKey(it) } }
+            .associateBy { it.albumId }
+        if (toAdd.isNotEmpty()) {
+            _albums.update { it + toAdd }
+            persistAlbumsToDisk()
+        }
+    }
+
+
+    /**
+     * Скачивает трек, повторяя попытки (с нарастающей паузой), пока не получится
+     * или пока не исчерпан [maxAttempts]. Отмена — через [cancelDownload].
+     */
+    fun download(track: Track, maxAttempts: Int = UNLIMITED_ATTEMPTS) {
         val videoId = track.videoId
         if (isDownloaded(videoId) || _downloadingIds.value.contains(videoId)) return
 
         _errors.update { it - videoId }
         _downloadingIds.update { it + videoId }
-        appScope.launch {
+        val job = appScope.launch(start = CoroutineStart.LAZY) {
             try {
-                kotlinx.coroutines.withTimeout(180_000L) {
-                    downloadTrackFile(track)
-                }
+                downloadWithRetry(track, maxAttempts)
                 _errors.update { it - videoId }
             } catch (e: CancellationException) {
                 Log.w(TAG, "download cancelled $videoId")
@@ -151,15 +209,65 @@ object OfflineRepository {
                 throw e
             } catch (t: Throwable) {
                 Log.e(TAG, "Не удалось скачать трек $videoId", t)
-                val msg = when (t) {
-                    is kotlinx.coroutines.TimeoutCancellationException -> "Таймаут скачивания (3 мин)"
-                    else -> t.message ?: "Не удалось скачать"
-                }
-                _errors.update { it + (videoId to msg) }
+                _errors.update { it + (videoId to (t.message ?: "Не удалось скачать")) }
                 cleanupPart(videoId)
             } finally {
                 _downloadingIds.update { it - videoId }
+                trackJobs.remove(videoId)
             }
+        }
+        trackJobs[videoId] = job
+        job.start()
+    }
+
+    fun cancelDownload(videoId: String) {
+        trackJobs[videoId]?.cancel()
+    }
+
+    fun cancelAlbumDownload(albumId: String) {
+        albumJobs[albumId]?.cancel()
+    }
+
+    /**
+     * Одна попытка = получить stream + скачать файл (с таймаутом).
+     * При любой сетевой/временной ошибке ждём и пробуем ещё раз; наружу выходим
+     * только при успехе, отмене, [PermanentDownloadException] или исчерпании попыток.
+     */
+    private suspend fun downloadWithRetry(track: Track, maxAttempts: Int) {
+        val videoId = track.videoId
+        var attempt = 0
+        while (true) {
+            attempt++
+            try {
+                kotlinx.coroutines.withTimeout(ATTEMPT_TIMEOUT_MS) {
+                    downloadTrackFile(track)
+                }
+                return
+            } catch (e: TimeoutCancellationException) {
+                // Таймаут попытки — это не отмена пользователем.
+                currentCoroutineContext().ensureActive()
+                Log.w(TAG, "Таймаут скачивания $videoId (попытка $attempt)")
+                _errors.update { it + (videoId to "Таймаут скачивания") }
+                cleanupPart(videoId)
+                if (attempt >= maxAttempts) throw java.io.IOException("Таймаут скачивания", e)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: PermanentDownloadException) {
+                throw e
+            } catch (t: Throwable) {
+                Log.w(TAG, "Ошибка скачивания $videoId (попытка $attempt): ${t.message}")
+                _errors.update { it + (videoId to (t.message ?: "Не удалось скачать")) }
+                cleanupPart(videoId)
+                if (attempt >= maxAttempts) throw t
+            }
+
+            // Если сети нет — дожидаемся её (но не бесконечно, вдруг монитор ошибся).
+            if (!NetworkMonitor.isOnline.value) {
+                withTimeoutOrNull(NETWORK_WAIT_MS) { NetworkMonitor.isOnline.first { it } }
+            }
+            val backoff = (RETRY_BASE_DELAY_MS shl (attempt - 1).coerceAtMost(4))
+                .coerceAtMost(RETRY_MAX_DELAY_MS)
+            delay(backoff)
         }
     }
 
@@ -176,33 +284,33 @@ object OfflineRepository {
 
         _downloadingAlbumIds.update { it + albumId }
         val snapshot = tracks.toList()
-        appScope.launch {
+        val job = appScope.launch(start = CoroutineStart.LAZY) {
             try {
                 val orderedIds = mutableListOf<String>()
-                var cancelled = false
                 for (track in snapshot) {
-                    if (!isActive) {
-                        cancelled = true
-                        break
-                    }
+                    ensureActive()
+
+                    // Если этот трек уже качается отдельно — дождёмся, а не будем дублировать.
+                    trackJobs[track.videoId]?.join()
+
                     if (isDownloaded(track.videoId)) {
                         orderedIds.add(track.videoId)
                         continue
                     }
                     _downloadingIds.update { it + track.videoId }
                     try {
-                        kotlinx.coroutines.withTimeout(180_000L) {
-                            downloadTrackFile(track)
-                        }
+                        // Повторяем, пока трек не скачается; к следующему — только после успеха.
+                        downloadWithRetry(track, UNLIMITED_ATTEMPTS)
+                        _errors.update { it - track.videoId }
                         if (isDownloaded(track.videoId)) {
                             orderedIds.add(track.videoId)
                         }
                     } catch (e: CancellationException) {
-                        cancelled = true
                         cleanupPart(track.videoId)
                         throw e
                     } catch (t: Throwable) {
-                        Log.e(TAG, "Альбом $albumId: трек ${track.videoId}", t)
+                        // Сюда попадаем только при заведомо неисправимой ошибке.
+                        Log.e(TAG, "Альбом $albumId: трек ${track.videoId} скачать невозможно", t)
                         _errors.update {
                             it + (track.videoId to (t.message ?: "Не удалось скачать"))
                         }
@@ -212,18 +320,11 @@ object OfflineRepository {
                     }
                 }
 
-                if (cancelled) {
-                    Log.w(TAG, "Альбом $albumId: отменено, скачано ${orderedIds.size}/${snapshot.size}")
-                    return@launch
-                }
-
-
                 if (orderedIds.size < snapshot.size) {
                     Log.w(
                         TAG,
                         "Альбом $albumId неполный: ${orderedIds.size}/${snapshot.size} — не помечаем скачанным",
                     )
-
                     return@launch
                 }
 
@@ -239,8 +340,11 @@ object OfflineRepository {
                 Log.i(TAG, "Альбом $albumId скачан полностью (${orderedIds.size} треков)")
             } finally {
                 _downloadingAlbumIds.update { it - albumId }
+                albumJobs.remove(albumId)
             }
         }
+        albumJobs[albumId] = job
+        job.start()
     }
 
     suspend fun deleteAlbum(albumId: String, deleteTrackFiles: Boolean = false) {
@@ -333,7 +437,7 @@ object OfflineRepository {
             val body = response.body ?: throw java.io.IOException("Пустой body")
             val reported = body.contentLength()
             if (reported > MAX_DOWNLOAD_BYTES) {
-                throw java.io.IOException("Файл слишком большой ($reported)")
+                throw PermanentDownloadException("Файл слишком большой ($reported)")
             }
 
             tmpFile.outputStream().use { output ->
@@ -345,7 +449,7 @@ object OfflineRepository {
                         if (read < 0) break
                         total += read
                         if (total > MAX_DOWNLOAD_BYTES) {
-                            throw java.io.IOException("Превышен лимит размера")
+                            throw PermanentDownloadException("Превышен лимит размера")
                         }
                         output.write(buffer, 0, read)
                     }

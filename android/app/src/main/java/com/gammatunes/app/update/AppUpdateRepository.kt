@@ -24,7 +24,7 @@ import java.net.Proxy
 import java.util.concurrent.TimeUnit
 
 /**
- * Checks GitHub Releases of reladronekinse/gammatunes for a newer build, downloads the APK
+ * Checks GitHub Releases of reladronekinse/gammatunes-android for a newer build, downloads the APK
  * asset and triggers a "seamless" in-app install via the PackageInstaller session API —
  * no browser, no file manager, only the standard system install confirmation.
  */
@@ -32,7 +32,7 @@ object AppUpdateRepository {
 
     private const val TAG = "AppUpdateRepository"
     private const val OWNER = "reladronekinse"
-    private const val REPO = "gammatunes"
+    private const val REPO = "gammatunes-android"
     private const val LATEST_RELEASE_URL =
         "https://api.github.com/repos/$OWNER/$REPO/releases/latest"
 

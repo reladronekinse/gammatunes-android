@@ -5,6 +5,7 @@
 
 package com.gammatunes.app.ui.screens
 
+import com.gammatunes.app.ui.components.dockPadding
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -82,7 +83,7 @@ fun QueueScreen(
 
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(bottom = 24.dp),
+            contentPadding = PaddingValues(bottom = dockPadding()),
         ) {
             itemsIndexed(entries, key = { _, e -> e.uid }) { index, entry ->
                 val isDragging = draggingUid == entry.uid

@@ -343,6 +343,17 @@ def _pick_thumbnail(thumbnails):
         return None
     return _upscale_thumbnail(thumbnails[-1].get("url"))
 
+def _banner_url(thumbnails):
+    """Широкая (16:9) версия картинки артиста для баннера на экране артиста."""
+    if not thumbnails:
+        return None
+    url = thumbnails[-1].get("url")
+    if not url:
+        return None
+    if ("googleusercontent.com" in url or "ggpht.com" in url) and _THUMBNAIL_SIZE_RE.search(url):
+        return _THUMBNAIL_SIZE_RE.sub("=w1280-h720", url, count=1)
+    return url
+
 def _parse_duration_seconds(item: dict) -> int | None:
     if item.get("duration_seconds") is not None:
         try:
@@ -492,6 +503,7 @@ def _artist_detail(browse_id: str, fallback_name: str | None = None, fallback_th
         "artistId": browse_id,
         "name": details.get("name") or fallback_name or "Unknown",
         "thumbnail": _upscale_thumbnail(fallback_thumbnail) or _pick_thumbnail(details.get("thumbnails")),
+        "banner": _banner_url(details.get("thumbnails")),
         "albums": albums,
         "singles": singles,
         "songs": songs,
@@ -501,20 +513,12 @@ _STREAM_CACHE_SAFETY_SECONDS = 300
 _stream_cache: dict[str, tuple[float, dict]] = {}
 _stream_cache_lock = threading.Lock()
 
-# Quality presets, mirrored on the Kotlin side (PlaybackSettingsRepository).
-# "high"   -> best available audio, no bitrate cap
-# "medium" -> capped around ~128kbps to save some bandwidth
-# "low"    -> capped around ~64kbps, aggressive data saver
+# Quality presets. Финальный bestaudio/best — страховка, чтобы yt-dlp не падал
+# с "Requested format is not available". Pure-audio предпочтём в коде ниже.
 _QUALITY_FORMATS: dict[str, str] = {
-    "high": "bestaudio[protocol^=http][protocol!=m3u8_native]/bestaudio/best",
-    "medium": (
-        "bestaudio[protocol^=http][protocol!=m3u8_native][abr<=128]/"
-        "bestaudio[abr<=128]/bestaudio[protocol^=http][protocol!=m3u8_native]/bestaudio/best"
-    ),
-    "low": (
-        "bestaudio[protocol^=http][protocol!=m3u8_native][abr<=64]/"
-        "bestaudio[abr<=64]/worstaudio[protocol^=http][protocol!=m3u8_native]/worstaudio/bestaudio/best"
-    ),
+    "high": "bestaudio/best",
+    "medium": "bestaudio[abr<=160]/bestaudio/best",
+    "low": "bestaudio[abr<=64]/worstaudio/bestaudio/best",
 }
 
 def _normalize_quality(quality: str | None) -> str:
@@ -539,11 +543,297 @@ _VIDEO_FORMAT = (
 )
 
 
+def _is_pure_audio(fmt: dict) -> bool:
+    """Формат без видеодорожки (vcodec отсутствует или 'none')."""
+    vc = fmt.get("vcodec")
+    ac = fmt.get("acodec")
+    return ac not in (None, "none") and vc in (None, "none")
+
+
+def _is_av_mux(fmt: dict) -> bool:
+    """Единый progressive-поток с видео И звуком (нужен ExoPlayer'у без merge)."""
+    vc = fmt.get("vcodec")
+    ac = fmt.get("acodec")
+    return (
+        bool(fmt.get("url"))
+        and vc not in (None, "none")
+        and ac not in (None, "none")
+    )
+
+
+def _ydl_extract(url: str, fmt: str | None, clients: list[str]) -> dict:
+    ydl_opts: dict = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "extractor_args": {"youtube": {"player_client": clients}},
+    }
+    if fmt:
+        ydl_opts["format"] = fmt
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        return ydl.extract_info(url, download=False)
+
+
+def _all_formats(info: dict) -> list[dict]:
+    formats = list(info.get("formats") or [])
+    # Выбранный format yt-dlp часто кладёт на верхний уровень
+    if info.get("url"):
+        formats = [info] + formats
+    for rf in info.get("requested_formats") or []:
+        if isinstance(rf, dict) and rf.get("url"):
+            formats.append(rf)
+    return formats
+
+
+def _result_from_fmt(
+    video_id: str,
+    fmt: dict,
+    info: dict,
+    *,
+    quality: str,
+    is_video: bool,
+) -> dict:
+    stream_url = fmt.get("url")
+    if not stream_url:
+        raise ValueError("Stream has no url")
+    http_headers = dict(fmt.get("http_headers") or info.get("http_headers") or {})
+    return {
+        "videoId": video_id,
+        "streamUrl": stream_url,
+        "mimeType": fmt.get("ext", "mp4" if is_video else "m4a"),
+        "bitrate": int(fmt.get("tbr") or fmt.get("abr") or 0),
+        "quality": quality,
+        "httpHeaders": http_headers,
+        "isVideoStream": bool(is_video),
+        "isHls": "m3u8" in stream_url.lower()
+        or str(fmt.get("protocol") or "").startswith("m3u8"),
+    }
+
+
+def _pick_audio_fmt(formats: list[dict], quality: str) -> dict | None:
+    """Лучший pure-audio; если нет — любой с acodec (хуже, но играет)."""
+    pure = [f for f in formats if _is_pure_audio(f)]
+    pool = pure if pure else [
+        f for f in formats
+        if f.get("url") and f.get("acodec") not in (None, "none")
+    ]
+    if not pool:
+        return None
+    if quality == "low":
+        pool_sorted = sorted(pool, key=lambda f: f.get("abr") or f.get("tbr") or 0)
+        return pool_sorted[0] if pool_sorted else None
+    if quality == "medium":
+        # ~128kbps, без перебора в космос
+        under = [f for f in pool if (f.get("abr") or f.get("tbr") or 0) <= 160]
+        use = under if under else pool
+        return max(use, key=lambda f: f.get("abr") or f.get("tbr") or 0)
+    return max(pool, key=lambda f: f.get("abr") or f.get("tbr") or 0)
+
+
+def _extract_audio_stream(video_id: str, quality: str) -> dict:
+    """
+    Трек = pure-audio.
+    Не завязываемся на жёсткий format=…: сначала тянем info, сами выбираем формат.
+    """
+    attempts = [
+        # music YTM — «студийный» звук трека
+        (f"https://music.youtube.com/watch?v={video_id}", ["android_music", "android", "web"]),
+        (f"https://music.youtube.com/watch?v={video_id}", ["web_music", "web"]),
+        # youtube.com — запасной вариант того же id
+        (f"https://www.youtube.com/watch?v={video_id}", ["android", "ios", "web"]),
+        (f"https://www.youtube.com/watch?v={video_id}", ["tv", "mweb", "web"]),
+    ]
+    last_err: Exception | None = None
+    for url, clients in attempts:
+        try:
+            # Без format= — иначе yt-dlp часто орёт "Requested format is not available"
+            info = _ydl_extract(url, None, clients)
+            formats = _all_formats(info)
+            chosen = _pick_audio_fmt(formats, quality)
+            if chosen is None:
+                # Последняя попытка через селектор bestaudio/best
+                info2 = _ydl_extract(url, "bestaudio/best", clients)
+                formats2 = _all_formats(info2)
+                chosen = _pick_audio_fmt(formats2, quality)
+                if chosen is None and info2.get("url"):
+                    chosen = info2
+                info = info2
+            if chosen is None or not chosen.get("url"):
+                raise ValueError("No audio url in formats")
+            # Трек: is_video всегда False, даже если случайно mux
+            return _result_from_fmt(
+                video_id, chosen, info, quality=quality, is_video=False,
+            )
+        except Exception as exc:
+            last_err = exc
+            print(f"[ytm-backend] audio attempt failed {url} {clients}: {exc}")
+            continue
+    raise last_err or ValueError("No audio stream found")
+
+
+def _extract_video_stream(video_id: str) -> dict:
+    """
+    Клип = progressive video+audio (один URL).
+    Pure-audio сюда НЕ отдаём — иначе «клип» звучит как трек без картинки.
+    """
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    attempts = [
+        (["tv", "tv_embedded", "ios", "mweb", "web"], None),
+        (["android", "web", "ios"], None),
+        (["web"], "18/22/best[height<=720][ext=mp4]/best"),
+    ]
+    last_err: Exception | None = None
+    for clients, fmt in attempts:
+        try:
+            info = _ydl_extract(url, fmt, clients)
+            formats = _all_formats(info)
+            mux = [f for f in formats if _is_av_mux(f)]
+            if not mux:
+                raise ValueError(
+                    f"No progressive mux (formats={len(formats)})"
+                )
+            # Не выше 720p — экономия, ExoPlayer спокойнее
+            under_720 = [f for f in mux if (f.get("height") or 0) <= 720]
+            pool = under_720 if under_720 else mux
+            chosen = max(
+                pool,
+                key=lambda f: (
+                    (f.get("height") or 0),
+                    (f.get("tbr") or f.get("abr") or 0),
+                ),
+            )
+            return _result_from_fmt(
+                video_id, chosen, info, quality="video", is_video=True,
+            )
+        except Exception as exc:
+            last_err = exc
+            print(f"[ytm-backend] video attempt failed clients={clients}: {exc}")
+            continue
+    raise last_err or ValueError("No video stream found")
+
+
+def _search_omv_clip_id(title: str | None, artist: str | None, exclude_id: str) -> str | None:
+    """Ищем official music video (OMV) по названию, если counterpart не пришёл."""
+    title = (title or "").strip()
+    artist = (artist or "").strip()
+    if not title:
+        return None
+    queries = []
+    if artist:
+        queries.append(f"{artist} {title}")
+        queries.append(f"{artist} {title} official video")
+    queries.append(f"{title} official music video")
+    try:
+        yt = _get_yt()
+        for q in queries:
+            try:
+                results = yt.search(q, filter="videos", limit=10) or []
+            except Exception as exc:
+                print(f"[ytm-backend] OMV search failed q={q!r}: {exc!r}")
+                continue
+            # 1) явный OMV
+            for r in results:
+                vid = r.get("videoId")
+                if not vid or vid == exclude_id:
+                    continue
+                vt = str(r.get("videoType") or "").upper()
+                if "OMV" in vt:
+                    print(f"[ytm-backend] OMV search hit {vid} via {q!r}")
+                    return vid
+            # 2) любой video с похожим title
+            title_l = title.lower()
+            for r in results:
+                vid = r.get("videoId")
+                if not vid or vid == exclude_id:
+                    continue
+                rt = str(r.get("title") or "").lower()
+                if title_l in rt or rt in title_l:
+                    print(f"[ytm-backend] video search fallback {vid} via {q!r}")
+                    return vid
+    except Exception as exc:
+        print(f"[ytm-backend] OMV search error: {exc!r}")
+    return None
+
+
+def _resolve_song_and_clip_ids(video_id: str) -> tuple[str, str | None]:
+    """
+    У YouTube Music у песни (ATV) и клипа (OMV) часто РАЗНЫЕ videoId.
+    1) counterpart из get_watch_playlist
+    2) fallback — поиск OMV по title/artist
+    Возвращает (song_id, clip_id|None).
+    """
+    song_id = video_id
+    clip_id: str | None = None
+    title: str | None = None
+    artist: str | None = None
+    try:
+        wp = _get_yt().get_watch_playlist(videoId=video_id, limit=5)
+        tracks = wp.get("tracks") or []
+        # Ищем трек с нашим id или берём первый
+        t = None
+        for item in tracks:
+            if item.get("videoId") == video_id:
+                t = item
+                break
+        if t is None and tracks:
+            t = tracks[0]
+        if t is not None:
+            current = t.get("videoId") or video_id
+            title = t.get("title")
+            artists = t.get("artists") or []
+            if artists and isinstance(artists[0], dict):
+                artist = artists[0].get("name")
+            cp = t.get("counterpart")
+            vtype = str(
+                t.get("videoType") or t.get("musicVideoType") or ""
+            ).upper()
+            is_omv = "OMV" in vtype or (
+                "VIDEO" in vtype and "ATV" not in vtype and "AUDIO" not in vtype
+            )
+            if isinstance(cp, dict) and cp.get("videoId"):
+                other = cp["videoId"]
+                if is_omv:
+                    clip_id = current
+                    song_id = other
+                else:
+                    song_id = current
+                    clip_id = other
+                print(
+                    f"[ytm-backend] counterpart song={song_id} clip={clip_id} "
+                    f"vtype={vtype or '?'}"
+                )
+            elif is_omv:
+                clip_id = current
+                print(f"[ytm-backend] current is OMV clip={clip_id}")
+            else:
+                print(
+                    f"[ytm-backend] no counterpart for {video_id} vtype={vtype or '?'}"
+                )
+    except Exception as exc:
+        print(f"[ytm-backend] resolve counterpart failed for {video_id}: {exc!r}")
+
+    if clip_id is None:
+        # Метаданные для поиска, если watch_playlist не дал title
+        if not title:
+            try:
+                song = _get_yt().get_song(video_id)
+                vd = (song or {}).get("videoDetails") or {}
+                title = vd.get("title") or title
+                artist = vd.get("author") or artist
+            except Exception as exc:
+                print(f"[ytm-backend] get_song failed: {exc!r}")
+        found = _search_omv_clip_id(title, artist, exclude_id=song_id)
+        if found:
+            clip_id = found
+
+    return song_id, clip_id
+
+
 def _extract_stream(video_id: str, quality: str | None = None, want_video: bool = False) -> dict:
     if _is_sc_id(video_id):
         return _extract_sc_stream(video_id)
     quality = _normalize_quality(quality)
-    cache_key = f"{video_id}:{'video' if want_video else quality}"
+    cache_key = f"{video_id}:{'video' if want_video else quality}:v6"
     with _stream_cache_lock:
         cached = _stream_cache.get(cache_key)
         if cached is not None:
@@ -551,66 +841,43 @@ def _extract_stream(video_id: str, quality: str | None = None, want_video: bool 
             if time.time() < expires_at:
                 return cached_result
 
-    fmt_selector = _VIDEO_FORMAT if want_video else _QUALITY_FORMATS[quality]
-    ydl_opts = {
-        "format": fmt_selector,
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "extractor_args": {"youtube": {"player_client": ["android", "web"]}},
-    }
-    # Videos work better from youtube.com; music songs from music.youtube.com
-    url = (
-        f"https://www.youtube.com/watch?v={video_id}"
-        if want_video
-        else f"https://music.youtube.com/watch?v={video_id}"
+    song_id, clip_id = _resolve_song_and_clip_ids(video_id)
+    print(
+        f"[ytm-backend] extract stream id={video_id} want_video={want_video} "
+        f"quality={quality} song={song_id} clip={clip_id}"
     )
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
 
-    if "url" in info:
-        stream_url = info["url"]
-        fmt = info
-    else:
-        formats = info.get("formats", [])
-        if want_video:
-            candidates = [
-                f for f in formats
-                if f.get("vcodec") not in (None, "none")
-                and f.get("acodec") not in (None, "none")
-                and f.get("url")
-            ]
-            if not candidates:
-                candidates = [f for f in formats if f.get("vcodec") not in (None, "none") and f.get("url")]
-            if not candidates:
-                raise ValueError("No video stream found")
-            fmt = max(
-                candidates,
-                key=lambda f: (
-                    (f.get("height") or 0),
-                    (f.get("tbr") or f.get("abr") or 0),
-                ),
-            )
+    if want_video:
+        # Порядок: counterpart/OMV → тот же id как progressive video (хуже, но лучше чем тишина)
+        targets: list[str] = []
+        if clip_id:
+            targets.append(clip_id)
+        if video_id not in targets:
+            targets.append(video_id)
+        last_err: Exception | None = None
+        for target in targets:
+            try:
+                result = _extract_video_stream(target)
+                result = dict(result)
+                result["resolvedVideoId"] = target
+                break
+            except Exception as exc:
+                last_err = exc
+                print(f"[ytm-backend] video target {target} failed: {exc!r}")
         else:
-            audio_formats = [f for f in formats if f.get("acodec") != "none"]
-            if not audio_formats:
-                raise ValueError("No audio stream found")
-            fmt = max(audio_formats, key=lambda f: f.get("abr") or 0)
-        stream_url = fmt["url"]
+            raise last_err or ValueError("No video stream found")
+    else:
+        result = _extract_audio_stream(song_id, quality)
+        result = dict(result)
+        result["resolvedVideoId"] = song_id
 
-    http_headers = dict(fmt.get("http_headers") or info.get("http_headers") or {})
-
-    result = {
-        "videoId": video_id,
-        "streamUrl": stream_url,
-        "mimeType": fmt.get("ext", "mp4" if want_video else "m4a"),
-        "bitrate": int(fmt.get("tbr") or fmt.get("abr") or 0),
-        "quality": "video" if want_video else quality,
-        "httpHeaders": http_headers,
-        "isVideoStream": bool(want_video),
-    }
+    print(
+        f"[ytm-backend] stream ok id={video_id} resolved={result.get('resolvedVideoId')} "
+        f"isVideo={result.get('isVideoStream')} quality={result.get('quality')} "
+        f"bitrate={result.get('bitrate')}"
+    )
     with _stream_cache_lock:
-        _stream_cache[cache_key] = (_stream_expiry(stream_url), result)
+        _stream_cache[cache_key] = (_stream_expiry(result["streamUrl"]), result)
     return result
 
 def _download_audio_file(video_id: str) -> tuple[str, str, str]:
@@ -845,7 +1112,7 @@ def _clean_ytdlp_error(exc: BaseException) -> str:
     elif "geo" in low or "not available in your country" in low or "blocked" in low:
         hint = "Трек недоступен в вашем регионе."
     elif "requested format is not available" in low or "no playable" in low:
-        hint = "У трека нет доступного аудиопотока (возможно, только платный Go+)."
+        hint = "Нет доступного потока для этого трека. Попробуйте другой или повторите позже."
     elif "429" in low or "rate limit" in low:
         hint = "SoundCloud ограничил запросы, попробуйте через минуту."
     elif "403" in low or "401" in low:

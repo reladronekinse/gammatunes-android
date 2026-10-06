@@ -33,6 +33,7 @@ class PlaybackService : MediaSessionService() {
             .build()
         player = exo
         PlayerBridge.attachPlayer(exo)
+        EqualizerManager.attach(exo)
 
         val forwarding = object : ForwardingPlayer(exo) {
             override fun seekToNext() = PlayerBridge.onSeekNext()
@@ -84,6 +85,7 @@ class PlaybackService : MediaSessionService() {
     }
 
     override fun onDestroy() {
+        EqualizerManager.detach()
         PlayerBridge.detachPlayer()
         mediaSession?.run {
             player.release()

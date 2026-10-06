@@ -33,6 +33,8 @@ data class Artist(
     val artistId: String,
     val name: String,
     val thumbnail: String? = null,
+    /** Широкая картинка для баннера на экране артиста (если бэкенд её отдал). */
+    val banner: String? = null,
     val albums: List<Album> = emptyList(),
     val singles: List<Album> = emptyList(),
 

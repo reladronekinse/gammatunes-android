@@ -27,11 +27,14 @@ class GammaTunesApplication : Application() {
         com.gammatunes.app.network.NetworkMonitor.init(this)
         PlayHistoryRepository.init(this)
         PlayStatsRepository.init(this)
+        com.gammatunes.app.ui.onboarding.OnboardingRepository.init(this)
         LocaleRepository.init(this)
         UiSettingsRepository.init(this)
         PlaybackSettingsRepository.init(this)
+        com.gammatunes.app.player.EqualizerManager.init(this)
         AuthRepository.init(this)
         SoundCloudAuthRepository.init(this)
+        com.gammatunes.app.together.TogetherSession.init(this)
 
         appScope.launch {
             if (LocalBackend.awaitReady(timeoutMs = 45_000)) {

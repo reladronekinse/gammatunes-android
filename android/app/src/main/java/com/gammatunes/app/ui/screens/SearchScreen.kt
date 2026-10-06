@@ -2,6 +2,7 @@
 
 package com.gammatunes.app.ui.screens
 
+import com.gammatunes.app.ui.components.dockPadding
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import com.gammatunes.app.offline.OfflineRepository
@@ -168,24 +169,33 @@ fun SearchScreen(onArtistClick: (Artist) -> Unit, onTrackClick: (Track, List<Tra
 
         Spacer(Modifier.height(12.dp))
 
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            MusicSource.entries.forEach { option ->
-                FilterChip(
-                    selected = source == option,
-                    onClick = {
-                        if (source != option) {
-                            source = option
-                        }
-                    },
-                    label = {
-                        Text(
-                            when (option) {
-                                MusicSource.YTM -> strings.sourceYtm
-                                MusicSource.SOUNDCLOUD -> strings.sourceSoundCloud
-                            },
-                        )
-                    },
-                )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                MusicSource.entries.forEach { option ->
+                    FilterChip(
+                        selected = source == option,
+                        onClick = {
+                            if (source != option) {
+                                source = option
+                            }
+                        },
+                        label = {
+                            Text(
+                                when (option) {
+                                    MusicSource.YTM -> strings.sourceYtm
+                                    MusicSource.SOUNDCLOUD -> strings.sourceSoundCloud
+                                },
+                            )
+                        },
+                    )
+                }
             }
         }
 
@@ -216,7 +226,7 @@ fun SearchScreen(onArtistClick: (Artist) -> Unit, onTrackClick: (Track, List<Tra
 
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(12.dp),
-            contentPadding = PaddingValues(bottom = 300.dp),
+            contentPadding = PaddingValues(bottom = dockPadding()),
         ) {
 
             if (query.isBlank()) {
@@ -449,7 +459,7 @@ private fun CachedSearchContent(onTrackClick: (Track, List<Track>) -> Unit) {
             )
             else -> LazyColumn(
                 verticalArrangement = Arrangement.spacedBy(12.dp),
-                contentPadding = PaddingValues(bottom = 300.dp),
+                contentPadding = PaddingValues(bottom = dockPadding()),
             ) {
                 items(results, key = { "cached:${it.videoId}" }) { track ->
                     TrackRow(track = track, onClick = {

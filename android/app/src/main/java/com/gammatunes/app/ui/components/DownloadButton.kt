@@ -53,7 +53,7 @@ fun DownloadButton(
                 onClick = {
                     scope.launch {
                         when {
-                            isDownloading -> Unit
+                            isDownloading -> OfflineRepository.cancelDownload(track.videoId)
                             isDownloaded -> OfflineRepository.delete(track.videoId)
                             else -> OfflineRepository.download(track)
                         }
